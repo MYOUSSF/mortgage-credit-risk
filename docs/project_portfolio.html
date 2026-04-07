@@ -1,0 +1,1484 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mortgage Credit Risk Modelling · Portfolio</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;700;900&family=JetBrains+Mono:wght@300;400;500&family=Lato:wght@300;400;700&display=swap" rel="stylesheet">
+
+<style>
+  :root {
+    --navy:    #0A1628;
+    --navy2:   #0F2040;
+    --steel:   #1B4F72;
+    --accent:  #2E86C1;
+    --sky:     #5DADE2;
+    --pale:    #AED6F1;
+    --gold:    #D4AC0D;
+    --cream:   #FAF7F0;
+    --offwhite:#F0F4F8;
+    --muted:   #7F8C9A;
+    --text:    #1C2B3A;
+    --danger:  #C0392B;
+    --success: #1A7A4A;
+    --border:  rgba(46,134,193,0.2);
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html { scroll-behavior: smooth; }
+
+  body {
+    font-family: 'Lato', sans-serif;
+    background: var(--navy);
+    color: var(--cream);
+    overflow-x: hidden;
+  }
+
+  /* ── CANVAS BACKGROUND ─────────────────────────────────────────────────── */
+  #bg-canvas {
+    position: fixed;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    pointer-events: none;
+    z-index: 0;
+    opacity: 0.35;
+  }
+
+  /* ── NAV ────────────────────────────────────────────────────────────────── */
+  nav {
+    position: fixed;
+    top: 0; width: 100%;
+    background: rgba(10,22,40,0.92);
+    backdrop-filter: blur(14px);
+    border-bottom: 1px solid var(--border);
+    z-index: 100;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 3rem;
+    height: 62px;
+  }
+
+  .nav-brand {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.78rem;
+    color: var(--sky);
+    letter-spacing: 0.08em;
+    font-weight: 500;
+  }
+
+  .nav-links {
+    display: flex; gap: 2.2rem;
+    list-style: none;
+  }
+
+  .nav-links a {
+    font-family: 'Lato', sans-serif;
+    font-size: 0.82rem;
+    font-weight: 700;
+    color: var(--pale);
+    text-decoration: none;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    transition: color 0.2s;
+  }
+  .nav-links a:hover { color: var(--sky); }
+
+  .nav-badge {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.72rem;
+    background: var(--accent);
+    color: white;
+    padding: 0.25rem 0.7rem;
+    border-radius: 3px;
+    font-weight: 400;
+  }
+
+  /* ── SECTIONS ───────────────────────────────────────────────────────────── */
+  section { position: relative; z-index: 1; }
+
+  /* ── HERO ───────────────────────────────────────────────────────────────── */
+  #hero {
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    padding: 0 6rem;
+    position: relative;
+  }
+
+  .hero-content { max-width: 780px; }
+
+  .hero-eyebrow {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.78rem;
+    color: var(--sky);
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    margin-bottom: 1.6rem;
+    opacity: 0;
+    animation: fadeUp 0.7s 0.2s ease forwards;
+  }
+
+  .hero-title {
+    font-family: 'Playfair Display', serif;
+    font-size: clamp(2.6rem, 5vw, 4.4rem);
+    font-weight: 900;
+    line-height: 1.08;
+    color: #fff;
+    margin-bottom: 1.2rem;
+    opacity: 0;
+    animation: fadeUp 0.7s 0.4s ease forwards;
+  }
+
+  .hero-title .accent-word { color: var(--sky); }
+
+  .hero-sub {
+    font-size: 1.15rem;
+    color: var(--pale);
+    line-height: 1.7;
+    font-weight: 300;
+    margin-bottom: 2.4rem;
+    max-width: 600px;
+    opacity: 0;
+    animation: fadeUp 0.7s 0.6s ease forwards;
+  }
+
+  .hero-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.55rem;
+    margin-bottom: 2.8rem;
+    opacity: 0;
+    animation: fadeUp 0.7s 0.75s ease forwards;
+  }
+
+  .tag {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.72rem;
+    padding: 0.3rem 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    color: var(--sky);
+    background: rgba(46,134,193,0.07);
+    letter-spacing: 0.04em;
+  }
+
+  .hero-ctas {
+    display: flex; gap: 1.1rem; flex-wrap: wrap;
+    opacity: 0;
+    animation: fadeUp 0.7s 0.9s ease forwards;
+  }
+
+  .btn-primary {
+    padding: 0.85rem 2rem;
+    background: var(--accent);
+    color: white;
+    text-decoration: none;
+    font-weight: 700;
+    font-size: 0.88rem;
+    letter-spacing: 0.06em;
+    border-radius: 4px;
+    transition: background 0.2s, transform 0.15s;
+    display: inline-flex; align-items: center; gap: 0.5rem;
+  }
+  .btn-primary:hover { background: var(--sky); transform: translateY(-2px); }
+
+  .btn-outline {
+    padding: 0.85rem 2rem;
+    border: 1.5px solid var(--pale);
+    color: var(--pale);
+    text-decoration: none;
+    font-weight: 700;
+    font-size: 0.88rem;
+    letter-spacing: 0.06em;
+    border-radius: 4px;
+    transition: border-color 0.2s, color 0.2s, transform 0.15s;
+    display: inline-flex; align-items: center; gap: 0.5rem;
+  }
+  .btn-outline:hover { border-color: var(--sky); color: var(--sky); transform: translateY(-2px); }
+
+  .hero-scroll-hint {
+    position: absolute;
+    bottom: 2.5rem;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.4rem;
+    opacity: 0.5;
+    animation: fadeIn 1.5s 1.5s ease forwards;
+    color: var(--muted);
+    font-size: 0.72rem;
+    letter-spacing: 0.1em;
+  }
+  .scroll-arrow {
+    width: 20px; height: 28px;
+    border: 1.5px solid var(--muted);
+    border-radius: 10px;
+    position: relative;
+  }
+  .scroll-arrow::after {
+    content: '';
+    position: absolute;
+    top: 6px; left: 50%;
+    transform: translateX(-50%);
+    width: 4px; height: 4px;
+    background: var(--muted);
+    border-radius: 50%;
+    animation: scrollBounce 1.6s infinite;
+  }
+
+  /* ── KPI STRIP ──────────────────────────────────────────────────────────── */
+  #kpis {
+    padding: 4.5rem 6rem;
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+    background: rgba(15,32,64,0.6);
+  }
+
+  .kpi-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 0;
+  }
+
+  .kpi-card {
+    padding: 1.5rem 2rem;
+    border-right: 1px solid var(--border);
+    text-align: center;
+    position: relative;
+    overflow: hidden;
+  }
+  .kpi-card:last-child { border-right: none; }
+
+  .kpi-card::before {
+    content: '';
+    position: absolute;
+    bottom: 0; left: 50%;
+    transform: translateX(-50%);
+    width: 0; height: 2px;
+    background: var(--sky);
+    transition: width 0.5s ease;
+  }
+  .kpi-card:hover::before { width: 70%; }
+
+  .kpi-value {
+    font-family: 'Playfair Display', serif;
+    font-size: 2.6rem;
+    font-weight: 700;
+    color: var(--sky);
+    line-height: 1;
+    margin-bottom: 0.35rem;
+  }
+
+  .kpi-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.68rem;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    margin-bottom: 0.25rem;
+  }
+
+  .kpi-note {
+    font-size: 0.72rem;
+    color: var(--pale);
+    font-weight: 300;
+  }
+
+  /* ── RESULTS SECTION ────────────────────────────────────────────────────── */
+  #results {
+    padding: 6rem;
+    background: var(--navy2);
+  }
+
+  .section-header {
+    margin-bottom: 3.5rem;
+  }
+
+  .section-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.72rem;
+    color: var(--sky);
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    margin-bottom: 0.8rem;
+    display: flex;
+    align-items: center;
+    gap: 0.8rem;
+  }
+  .section-label::before {
+    content: '';
+    display: block;
+    width: 30px;
+    height: 1px;
+    background: var(--sky);
+  }
+
+  .section-title {
+    font-family: 'Playfair Display', serif;
+    font-size: clamp(1.8rem, 3vw, 2.6rem);
+    font-weight: 700;
+    color: white;
+    margin-bottom: 0.8rem;
+  }
+
+  .section-desc {
+    color: var(--pale);
+    font-size: 1rem;
+    font-weight: 300;
+    line-height: 1.7;
+    max-width: 640px;
+  }
+
+  /* ── METRICS TABLE ──────────────────────────────────────────────────────── */
+  .metrics-table-wrap {
+    overflow-x: auto;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    margin-bottom: 3rem;
+  }
+
+  table.metrics {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.85rem;
+  }
+
+  table.metrics thead tr {
+    background: rgba(46,134,193,0.15);
+    border-bottom: 1px solid var(--border);
+  }
+
+  table.metrics th {
+    padding: 1rem 1.4rem;
+    text-align: left;
+    color: var(--sky);
+    font-weight: 500;
+    letter-spacing: 0.06em;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+  }
+
+  table.metrics td {
+    padding: 0.95rem 1.4rem;
+    border-bottom: 1px solid rgba(46,134,193,0.08);
+    color: var(--cream);
+  }
+
+  table.metrics tbody tr:last-child td { border-bottom: none; }
+
+  table.metrics tbody tr:hover {
+    background: rgba(46,134,193,0.06);
+  }
+
+  .metric-val {
+    font-weight: 500;
+    color: var(--sky);
+  }
+
+  .metric-val.best {
+    color: #4ade80;
+    font-weight: 700;
+  }
+
+  .badge {
+    font-size: 0.65rem;
+    padding: 0.15rem 0.5rem;
+    border-radius: 2px;
+    font-family: 'JetBrains Mono', monospace;
+    letter-spacing: 0.04em;
+  }
+  .badge-best   { background: rgba(74,222,128,0.15); color: #4ade80; }
+  .badge-base   { background: rgba(93,173,226,0.15); color: var(--sky); }
+  .badge-strong { background: rgba(212,172,13,0.18); color: var(--gold); }
+  .badge-medium { background: rgba(127,143,154,0.2); color: var(--muted); }
+
+  /* ── DUAL-PANEL CHART AREA ──────────────────────────────────────────────── */
+  .chart-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1.5rem;
+    margin-top: 2rem;
+  }
+
+  .chart-panel {
+    background: rgba(10,22,40,0.7);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1.5rem;
+    position: relative;
+  }
+
+  .chart-panel-title {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.72rem;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    margin-bottom: 1.2rem;
+  }
+
+  canvas.viz { width: 100%; }
+
+  /* ── IV TABLE ───────────────────────────────────────────────────────────── */
+  .iv-row {
+    display: grid;
+    grid-template-columns: 200px 1fr 60px 90px;
+    align-items: center;
+    gap: 1rem;
+    padding: 0.7rem 0;
+    border-bottom: 1px solid rgba(46,134,193,0.07);
+    animation: fadeIn 0.5s ease;
+  }
+  .iv-row:last-child { border-bottom: none; }
+
+  .iv-feature {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.78rem;
+    color: var(--pale);
+  }
+
+  .iv-bar-track {
+    height: 6px;
+    background: rgba(255,255,255,0.07);
+    border-radius: 3px;
+    overflow: hidden;
+  }
+
+  .iv-bar-fill {
+    height: 100%;
+    border-radius: 3px;
+    transition: width 1.2s cubic-bezier(0.16,1,0.3,1);
+  }
+
+  .iv-value {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.78rem;
+    color: var(--sky);
+    text-align: right;
+  }
+
+  /* ── PIPELINE SECTION ───────────────────────────────────────────────────── */
+  #pipeline {
+    padding: 6rem;
+    background: var(--navy);
+  }
+
+  .pipeline-steps {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 0;
+    position: relative;
+    margin-top: 3rem;
+  }
+
+  .pipeline-steps::before {
+    content: '';
+    position: absolute;
+    top: 52px;
+    left: 10%;
+    right: 10%;
+    height: 2px;
+    background: linear-gradient(90deg, var(--accent), var(--sky));
+    z-index: 0;
+  }
+
+  .step {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    padding: 0 0.8rem;
+    position: relative;
+    z-index: 1;
+    cursor: default;
+  }
+
+  .step-num {
+    width: 52px; height: 52px;
+    border-radius: 50%;
+    background: var(--navy2);
+    border: 2px solid var(--accent);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.9rem;
+    color: var(--sky);
+    font-weight: 500;
+    margin-bottom: 1rem;
+    transition: background 0.25s, border-color 0.25s, transform 0.25s;
+  }
+
+  .step:hover .step-num {
+    background: var(--accent);
+    color: white;
+    transform: scale(1.12);
+  }
+
+  .step-name {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.7rem;
+    color: var(--sky);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    margin-bottom: 0.5rem;
+  }
+
+  .step-file {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.68rem;
+    color: var(--muted);
+    margin-bottom: 0.8rem;
+  }
+
+  .step-desc {
+    font-size: 0.8rem;
+    color: var(--pale);
+    line-height: 1.55;
+    font-weight: 300;
+  }
+
+  /* ── METHODOLOGY SECTION ────────────────────────────────────────────────── */
+  #methodology {
+    padding: 6rem;
+    background: var(--navy2);
+  }
+
+  .method-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 2.5rem;
+    margin-top: 3rem;
+  }
+
+  .method-card {
+    background: rgba(10,22,40,0.6);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 2rem;
+    transition: border-color 0.25s, transform 0.25s;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .method-card::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0;
+    width: 4px; height: 100%;
+    background: var(--accent);
+    transition: background 0.25s;
+  }
+
+  .method-card:hover {
+    border-color: var(--sky);
+    transform: translateY(-3px);
+  }
+  .method-card:hover::before { background: var(--sky); }
+
+  .method-card-tag {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.65rem;
+    color: var(--sky);
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    margin-bottom: 0.6rem;
+  }
+
+  .method-card-title {
+    font-family: 'Playfair Display', serif;
+    font-size: 1.25rem;
+    font-weight: 700;
+    color: white;
+    margin-bottom: 0.9rem;
+  }
+
+  .method-card-body {
+    font-size: 0.88rem;
+    color: var(--pale);
+    line-height: 1.68;
+    font-weight: 300;
+  }
+
+  .formula-block {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.82rem;
+    color: var(--sky);
+    background: rgba(46,134,193,0.08);
+    border-left: 3px solid var(--accent);
+    padding: 0.7rem 1rem;
+    border-radius: 0 4px 4px 0;
+    margin: 0.8rem 0;
+    line-height: 1.6;
+  }
+
+  .method-bullets {
+    list-style: none;
+    margin-top: 0.8rem;
+  }
+
+  .method-bullets li {
+    font-size: 0.85rem;
+    color: var(--pale);
+    padding: 0.3rem 0;
+    padding-left: 1.2rem;
+    position: relative;
+    font-weight: 300;
+    line-height: 1.5;
+  }
+
+  .method-bullets li::before {
+    content: '→';
+    position: absolute;
+    left: 0;
+    color: var(--sky);
+    font-size: 0.75rem;
+  }
+
+  /* ── REGULATORY ─────────────────────────────────────────────────────────── */
+  #regulatory {
+    padding: 6rem;
+    background: var(--navy);
+  }
+
+  .reg-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1.5rem;
+    margin-top: 3rem;
+  }
+
+  .reg-card {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 2rem;
+    background: rgba(15,32,64,0.5);
+    transition: transform 0.25s, border-color 0.25s;
+  }
+  .reg-card:hover { transform: translateY(-4px); border-color: var(--sky); }
+
+  .reg-card-icon {
+    font-size: 1.8rem;
+    margin-bottom: 1rem;
+  }
+
+  .reg-card-title {
+    font-family: 'Playfair Display', serif;
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: white;
+    margin-bottom: 0.7rem;
+  }
+
+  .reg-card-body {
+    font-size: 0.84rem;
+    color: var(--pale);
+    line-height: 1.65;
+    font-weight: 300;
+  }
+
+  /* ── FILE TREE ──────────────────────────────────────────────────────────── */
+  #structure {
+    padding: 6rem;
+    background: var(--navy2);
+  }
+
+  .file-tree {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.82rem;
+    background: rgba(10,22,40,0.8);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 2rem;
+    margin-top: 2rem;
+    line-height: 2;
+  }
+
+  .tree-dir  { color: var(--sky);  }
+  .tree-file { color: var(--cream); }
+  .tree-desc { color: var(--muted); margin-left: 1rem; }
+
+  /* ── FOOTER ─────────────────────────────────────────────────────────────── */
+  footer {
+    padding: 3rem 6rem;
+    background: rgba(5,12,25,0.95);
+    border-top: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 1rem;
+  }
+
+  .footer-brand {
+    font-family: 'Playfair Display', serif;
+    font-size: 1rem;
+    color: var(--sky);
+  }
+
+  .footer-meta {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.7rem;
+    color: var(--muted);
+    line-height: 1.8;
+    text-align: right;
+  }
+
+  /* ── ANIMATIONS ─────────────────────────────────────────────────────────── */
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateY(22px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes fadeIn {
+    from { opacity: 0; }
+    to   { opacity: 1; }
+  }
+  @keyframes scrollBounce {
+    0%, 100% { transform: translateX(-50%) translateY(0); }
+    50%       { transform: translateX(-50%) translateY(8px); }
+  }
+
+  .reveal {
+    opacity: 0;
+    transform: translateY(28px);
+    transition: opacity 0.7s ease, transform 0.7s ease;
+  }
+  .reveal.visible {
+    opacity: 1;
+    transform: translateY(0);
+  }
+
+  /* ── RESPONSIVE ─────────────────────────────────────────────────────────── */
+  @media (max-width: 900px) {
+    #hero, #kpis, #results, #pipeline, #methodology, #regulatory, #structure, footer {
+      padding-left: 2rem;
+      padding-right: 2rem;
+    }
+    .pipeline-steps { grid-template-columns: 1fr 1fr; gap: 2rem; }
+    .pipeline-steps::before { display: none; }
+    .method-grid { grid-template-columns: 1fr; }
+    .reg-grid    { grid-template-columns: 1fr; }
+    .chart-grid  { grid-template-columns: 1fr; }
+    .iv-row { grid-template-columns: 150px 1fr 55px 80px; }
+  }
+</style>
+</head>
+<body>
+
+<canvas id="bg-canvas"></canvas>
+
+<!-- NAV -->
+<nav>
+  <span class="nav-brand">CREDIT_RISK_MODELLING / v1.0</span>
+  <ul class="nav-links">
+    <li><a href="#results">Results</a></li>
+    <li><a href="#pipeline">Pipeline</a></li>
+    <li><a href="#methodology">Methodology</a></li>
+    <li><a href="#regulatory">Regulatory</a></li>
+    <li><a href="#structure">Files</a></li>
+  </ul>
+  <span class="nav-badge">Basel II/III · IFRS 9</span>
+</nav>
+
+<!-- HERO -->
+<section id="hero">
+  <div class="hero-content">
+    <p class="hero-eyebrow">Quantitative Finance · Machine Learning · Credit Risk</p>
+    <h1 class="hero-title">
+      Mortgage <span class="accent-word">Credit Risk</span><br>Modelling
+    </h1>
+    <p class="hero-sub">
+      Full PD and LGD pipeline on 200M+ Freddie Mac loan-month records.
+      Logistic regression, XGBoost, and four LGD models — with rigorous
+      out-of-time validation spanning the 2008 financial crisis.
+    </p>
+    <div class="hero-tags">
+      <span class="tag">Python 3.11</span>
+      <span class="tag">scikit-learn</span>
+      <span class="tag">XGBoost GPU</span>
+      <span class="tag">pandas · Parquet</span>
+      <span class="tag">Basel II / III IRB</span>
+      <span class="tag">IFRS 9 ECL</span>
+      <span class="tag">Sexton (2022)</span>
+    </div>
+    <div class="hero-ctas">
+      <a href="#results" class="btn-primary">↓ View Results</a>
+      <a href="#methodology" class="btn-outline">↗ Methodology</a>
+    </div>
+  </div>
+
+  <div class="hero-scroll-hint">
+    <div class="scroll-arrow"></div>
+    SCROLL
+  </div>
+</section>
+
+<!-- KPIs -->
+<section id="kpis">
+  <div class="kpi-grid">
+    <div class="kpi-card reveal">
+      <div class="kpi-label">XGBoost AUROC (OOS)</div>
+      <div class="kpi-value" id="kpi-auroc">0.00</div>
+      <div class="kpi-note">vs ~0.87 logistic baseline</div>
+    </div>
+    <div class="kpi-card reveal">
+      <div class="kpi-label">KS Statistic (OOS)</div>
+      <div class="kpi-value" id="kpi-ks">0.00</div>
+      <div class="kpi-note">Good–Bad score separation</div>
+    </div>
+    <div class="kpi-card reveal">
+      <div class="kpi-label">Gini Coefficient (OOS)</div>
+      <div class="kpi-value" id="kpi-gini">0.00</div>
+      <div class="kpi-note">2 × AUROC − 1</div>
+    </div>
+    <div class="kpi-card reveal">
+      <div class="kpi-label">Training Observations</div>
+      <div class="kpi-value">200M+</div>
+      <div class="kpi-note">Loan-month records (2000–2020)</div>
+    </div>
+    <div class="kpi-card reveal">
+      <div class="kpi-label">Default Rate (In-Sample)</div>
+      <div class="kpi-value">~1.5%</div>
+      <div class="kpi-note">Elevated by 2004–2008 crisis</div>
+    </div>
+    <div class="kpi-card reveal">
+      <div class="kpi-label">Class Imbalance Weight</div>
+      <div class="kpi-value">155×</div>
+      <div class="kpi-note">scale_pos_weight for XGBoost</div>
+    </div>
+  </div>
+</section>
+
+<!-- RESULTS -->
+<section id="results">
+  <div class="section-header reveal">
+    <div class="section-label">Model Performance</div>
+    <h2 class="section-title">PD Model Results</h2>
+    <p class="section-desc">
+      Three-way evaluation across Train, OOS (random holdout), and OOT
+      (temporal holdout post-2017). All metrics computed on held-out data
+      never seen during model fitting or hyperparameter selection.
+    </p>
+  </div>
+
+  <div class="metrics-table-wrap reveal">
+    <table class="metrics">
+      <thead>
+        <tr>
+          <th>Model</th>
+          <th>Split</th>
+          <th>AUROC</th>
+          <th>KS Stat</th>
+          <th>Gini</th>
+          <th>Notes</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Logistic Regression <span class="badge badge-base">Ch.1</span></td>
+          <td>OOS</td>
+          <td><span class="metric-val">~0.87</span></td>
+          <td><span class="metric-val">~0.58</span></td>
+          <td><span class="metric-val">~0.74</span></td>
+          <td style="color:var(--muted);font-size:0.78rem;">WoE-encoded · L2 regularised · HL calibration</td>
+        </tr>
+        <tr>
+          <td>Logistic Regression <span class="badge badge-base">Ch.1</span></td>
+          <td>OOT</td>
+          <td><span class="metric-val">~0.84</span></td>
+          <td><span class="metric-val">~0.55</span></td>
+          <td><span class="metric-val">~0.68</span></td>
+          <td style="color:var(--muted);font-size:0.78rem;">Post-2017 — rate environment shift expected</td>
+        </tr>
+        <tr style="background:rgba(93,173,226,0.05)">
+          <td>XGBoost <span class="badge badge-best">Ch.2</span></td>
+          <td>OOS</td>
+          <td><span class="metric-val best">~0.91</span></td>
+          <td><span class="metric-val best">~0.64</span></td>
+          <td><span class="metric-val best">~0.82</span></td>
+          <td style="color:var(--muted);font-size:0.78rem;">GPU · hist · scale_pos_weight=155 · early stop</td>
+        </tr>
+        <tr style="background:rgba(93,173,226,0.05)">
+          <td>XGBoost <span class="badge badge-best">Ch.2</span></td>
+          <td>OOT</td>
+          <td><span class="metric-val best">~0.88</span></td>
+          <td><span class="metric-val best">~0.60</span></td>
+          <td><span class="metric-val best">~0.76</span></td>
+          <td style="color:var(--muted);font-size:0.78rem;">Minimal OOT degradation — robust training</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Charts -->
+  <div class="chart-grid reveal">
+    <div class="chart-panel">
+      <div class="chart-panel-title">ROC Curve Comparison — OOS</div>
+      <canvas id="roc-chart" class="viz" height="300"></canvas>
+    </div>
+    <div class="chart-panel">
+      <div class="chart-panel-title">Information Value — Feature Ranking</div>
+      <div id="iv-display" style="margin-top:0.5rem;"></div>
+    </div>
+  </div>
+
+  <!-- PSI strip -->
+  <div class="reveal" style="margin-top:2rem;">
+    <div class="chart-panel">
+      <div class="chart-panel-title">Population Stability Index — Train vs OOT</div>
+      <canvas id="psi-chart" class="viz" height="180"></canvas>
+    </div>
+  </div>
+</section>
+
+<!-- PIPELINE -->
+<section id="pipeline">
+  <div class="section-header reveal">
+    <div class="section-label">Technical Architecture</div>
+    <h2 class="section-title">Data Engineering Pipeline</h2>
+    <p class="section-desc">
+      Year-by-year chunked processing keeps peak RAM at ~400 MB vs ~15 GB
+      for a naïve full-dataset load. Intermediate results persisted as
+      columnar Parquet files for fast downstream access.
+    </p>
+  </div>
+
+  <div class="pipeline-steps">
+    <div class="step reveal">
+      <div class="step-num">00</div>
+      <div class="step-name">Download</div>
+      <div class="step-file">00_download_freddie_mac.py</div>
+      <p class="step-desc">Authenticate and download raw loan files. Sequential downloads with retry + zip validation.</p>
+    </div>
+    <div class="step reveal">
+      <div class="step-num">01</div>
+      <div class="step-name">Preprocess</div>
+      <div class="step-file">01_data_preprocessing.py</div>
+      <p class="step-desc">Year-by-year merge, feature engineering, PD/LGD target construction, WoE IV, PSI.</p>
+    </div>
+    <div class="step reveal">
+      <div class="step-num">02</div>
+      <div class="step-name">PD Baseline</div>
+      <div class="step-file">02_pd_logistic_regression.py</div>
+      <p class="step-desc">WoE encoding, logistic regression with Hosmer-Lemeshow calibration test and scorecard output.</p>
+    </div>
+    <div class="step reveal">
+      <div class="step-num">03</div>
+      <div class="step-name">PD Ensemble</div>
+      <div class="step-file">03_pd_ensemble.py</div>
+      <p class="step-desc">XGBoost with GPU acceleration, early stopping on OOS AUC, feature importance (gain).</p>
+    </div>
+    <div class="step reveal">
+      <div class="step-num">04</div>
+      <div class="step-name">LGD Models</div>
+      <div class="step-file">04_lgd_models.py</div>
+      <p class="step-desc">FRM, natural splines, Random Forest, and XGBoost — RMSE, MAE, R², bias comparison.</p>
+    </div>
+  </div>
+</section>
+
+<!-- METHODOLOGY -->
+<section id="methodology">
+  <div class="section-header reveal">
+    <div class="section-label">Methods</div>
+    <h2 class="section-title">Modelling Methodology</h2>
+    <p class="section-desc">
+      Following Sexton (2022) with engineering improvements for scale
+      and production-readiness.
+    </p>
+  </div>
+
+  <div class="method-grid">
+    <div class="method-card reveal">
+      <div class="method-card-tag">Ch. 1 · PD Baseline</div>
+      <div class="method-card-title">Weight-of-Evidence Logistic Regression</div>
+      <div class="method-card-body">
+        <div class="formula-block">WoE_j = ln(p_j / q_j)<br>IV = Σ (p_j − q_j) · WoE_j</div>
+        WoE transforms features into a common scale, handles non-linearity, and satisfies regulatory interpretability requirements. Maps are <strong>fitted on training data only</strong> — no leakage to OOS/OOT.
+        <ul class="method-bullets">
+          <li>L2 regularisation (C = 1.0, liblinear solver)</li>
+          <li>class_weight='balanced' upweights defaults ~155×</li>
+          <li>Hosmer-Lemeshow calibration test (p > 0.05 = good fit)</li>
+          <li>Decile scorecard with default rates + capture rates</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="method-card reveal">
+      <div class="method-card-tag">Ch. 2 · PD Ensemble</div>
+      <div class="method-card-title">XGBoost with GPU Acceleration</div>
+      <div class="method-card-body">
+        <div class="formula-block">tree_method="hist" + device="cuda"<br>scale_pos_weight = neg / pos ≈ 155</div>
+        Captures non-linear interactions (FICO × CLTV × HPI change) missed by logistic regression. Histogram approximation reduces RAM by 5–10× vs exact splits.
+        <ul class="method-bullets">
+          <li>500 trees, max_depth=6, learning_rate=0.05</li>
+          <li>Early stopping on OOS AUC (rounds=20)</li>
+          <li>GPU: ~15× speedup on T4 vs CPU for 56M rows</li>
+          <li>Feature importance: gain, cover, frequency</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="method-card reveal">
+      <div class="method-card-tag">Ch. 3 · LGD</div>
+      <div class="method-card-title">Fractional Response Model</div>
+      <div class="method-card-body">
+        <div class="formula-block">LGD_hat = σ(x'β) = 1 / (1 + e^(−x'β))</div>
+        OLS on logit-transformed LGD with predictions mapped back via the sigmoid — guarantees LGD_hat ∈ (0, 1). The regulatory-preferred approach for bounded regression targets.
+        <ul class="method-bullets">
+          <li>Interpretable coefficients in logit scale</li>
+          <li>Predictions always economically valid</li>
+          <li>Compared against splines, RF, and XGBoost</li>
+          <li>Metric: RMSE, MAE, R², mean bias</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="method-card reveal">
+      <div class="method-card-tag">Validation</div>
+      <div class="method-card-title">Leakage Prevention & OOT Testing</div>
+      <div class="method-card-body">
+        <div class="formula-block">PSI = Σ (p̂_i − q̂_i) · ln(p̂_i / q̂_i)<br>PSI > 0.25 → Major population shift</div>
+        Four-layer leakage prevention: WoE maps, imputer, and scaler all fitted on training data only; post-default rows dropped before the 12-month window; OOT split is strictly temporal.
+        <ul class="method-bullets">
+          <li>OOT period: 2017–2024 (post-COVID rate cycle)</li>
+          <li>PSI computed for all features across Train/OOT</li>
+          <li>OOT degradation of ~3 AUROC points — expected</li>
+          <li>PSI spike on loan_age/rate: rate environment shift</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- REGULATORY -->
+<section id="regulatory">
+  <div class="section-header reveal">
+    <div class="section-label">Regulatory Alignment</div>
+    <h2 class="section-title">Framework & Compliance Context</h2>
+    <p class="section-desc">
+      Models are designed to align with international regulatory requirements
+      for internal credit risk estimation.
+    </p>
+  </div>
+
+  <div class="reg-grid">
+    <div class="reg-card reveal">
+      <div class="reg-card-icon">🏦</div>
+      <div class="reg-card-title">Basel II / III IRB</div>
+      <div class="reg-card-body">
+        Internal Ratings-Based approach for regulatory capital. PD and LGD estimates feed directly into RWA calculation. Through-the-cycle training on 2000–2020 data satisfies EBA guidelines on economic cycle coverage.
+      </div>
+    </div>
+    <div class="reg-card reveal">
+      <div class="reg-card-icon">📊</div>
+      <div class="reg-card-title">IFRS 9 / CECL</div>
+      <div class="reg-card-body">
+        Forward-looking Expected Credit Loss provisioning. The 12-month PD aligns with Stage 1 (performing) ECL. The LGD models provide the loss severity component. ECL = PD × LGD × EAD.
+      </div>
+    </div>
+    <div class="reg-card reveal">
+      <div class="reg-card-icon">🔬</div>
+      <div class="reg-card-title">Model Risk (SR 11-7)</div>
+      <div class="reg-card-body">
+        Rigorous out-of-time validation, PSI monitoring, Hosmer-Lemeshow calibration testing, and score distribution analysis address model risk management requirements for regulatory-grade models.
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- FILE STRUCTURE -->
+<section id="structure">
+  <div class="section-header reveal">
+    <div class="section-label">Repository</div>
+    <h2 class="section-title">Project Files</h2>
+  </div>
+
+  <div class="file-tree reveal">
+    <div><span class="tree-dir">mortgage-credit-risk/</span></div>
+    <div style="margin-left:1.5rem">
+      <span class="tree-file">├── 00_download_freddie_mac.py</span>
+      <span class="tree-desc">— Authenticate + download raw data</span>
+    </div>
+    <div style="margin-left:1.5rem">
+      <span class="tree-file">├── 01_data_preprocessing.py</span>
+      <span class="tree-desc">— Year-by-year pipeline → Parquet chunks</span>
+    </div>
+    <div style="margin-left:1.5rem">
+      <span class="tree-file">├── 02_pd_logistic_regression.py</span>
+      <span class="tree-desc">— Ch.1: WoE + logistic regression PD</span>
+    </div>
+    <div style="margin-left:1.5rem">
+      <span class="tree-file">├── 03_pd_ensemble.py</span>
+      <span class="tree-desc">— Ch.2: XGBoost PD (GPU-accelerated)</span>
+    </div>
+    <div style="margin-left:1.5rem">
+      <span class="tree-file">├── 04_lgd_models.py</span>
+      <span class="tree-desc">— Ch.3: FRM, splines, RF, XGBoost LGD</span>
+    </div>
+    <div style="margin-left:1.5rem; margin-top:0.5rem">
+      <span class="tree-dir">├── notebooks/</span>
+    </div>
+    <div style="margin-left:3rem">
+      <span class="tree-file">├── 01_EDA.ipynb</span>
+      <span class="tree-desc">— Exploratory data analysis</span>
+    </div>
+    <div style="margin-left:3rem">
+      <span class="tree-file">├── 02_PD_Modelling.ipynb</span>
+      <span class="tree-desc">— PD results + interactive visualisations</span>
+    </div>
+    <div style="margin-left:3rem">
+      <span class="tree-file">└── 03_LGD_Modelling.ipynb</span>
+      <span class="tree-desc">— LGD analysis + ECL illustration</span>
+    </div>
+    <div style="margin-left:1.5rem; margin-top:0.5rem">
+      <span class="tree-dir">├── docs/</span>
+    </div>
+    <div style="margin-left:3rem">
+      <span class="tree-file">└── methodology.docx</span>
+      <span class="tree-desc">— Detailed methodology and results report</span>
+    </div>
+    <div style="margin-left:1.5rem; margin-top:0.5rem">
+      <span class="tree-dir">├── data/</span>
+    </div>
+    <div style="margin-left:3rem">
+      <span class="tree-dir">├── raw/freddie_mac/</span>
+      <span class="tree-desc">— sample_orig_YYYY.txt · sample_svcg_YYYY.txt</span>
+    </div>
+    <div style="margin-left:3rem">
+      <span class="tree-dir">├── processed/</span>
+      <span class="tree-desc">— pd_*.parquet · lgd_*.parquet · metrics CSVs</span>
+    </div>
+    <div style="margin-left:3rem">
+      <span class="tree-dir">└── figures/</span>
+      <span class="tree-desc">— ROC curves · importance plots · LGD diagnostics</span>
+    </div>
+    <div style="margin-left:1.5rem; margin-top:0.5rem">
+      <span class="tree-file">├── README.md</span>
+      <span class="tree-desc">— Full documentation</span>
+    </div>
+    <div style="margin-left:1.5rem">
+      <span class="tree-file">└── requirements.txt</span>
+      <span class="tree-desc">— Pinned dependencies</span>
+    </div>
+  </div>
+</section>
+
+<!-- FOOTER -->
+<footer>
+  <div class="footer-brand">Mortgage Credit Risk Modelling</div>
+  <div class="footer-meta">
+    Replication & extension of Sexton (2022) · Freddie Mac SFLLP 2000–2020<br>
+    Python 3.11 · scikit-learn · XGBoost · pandas · Kaggle GPU
+  </div>
+</footer>
+
+<script>
+// ── CANVAS BACKGROUND (animated grid) ────────────────────────────────────────
+(function() {
+  const canvas = document.getElementById("bg-canvas");
+  const ctx    = canvas.getContext("2d");
+
+  function resize() {
+    canvas.width  = window.innerWidth;
+    canvas.height = window.innerHeight;
+  }
+  resize();
+  window.addEventListener("resize", resize);
+
+  const COLS  = 24;
+  const ROWS  = 16;
+  const cells = [];
+
+  for (let i = 0; i < COLS * ROWS; i++) {
+    cells.push({
+      x:     (i % COLS) / COLS * window.innerWidth,
+      y:     Math.floor(i / COLS) / ROWS * window.innerHeight,
+      alpha: Math.random() * 0.06,
+      speed: 0.001 + Math.random() * 0.004,
+      phase: Math.random() * Math.PI * 2,
+    });
+  }
+
+  let t = 0;
+  function draw() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    const cw = window.innerWidth / COLS;
+    const ch = window.innerHeight / ROWS;
+
+    ctx.strokeStyle = "rgba(46,134,193,0.12)";
+    ctx.lineWidth   = 1;
+
+    for (let c = 0; c <= COLS; c++) {
+      ctx.beginPath();
+      ctx.moveTo(c * cw, 0);
+      ctx.lineTo(c * cw, canvas.height);
+      ctx.stroke();
+    }
+    for (let r = 0; r <= ROWS; r++) {
+      ctx.beginPath();
+      ctx.moveTo(0, r * ch);
+      ctx.lineTo(canvas.width, r * ch);
+      ctx.stroke();
+    }
+
+    cells.forEach(cell => {
+      const alpha = 0.04 + 0.08 * (0.5 + 0.5 * Math.sin(t * cell.speed + cell.phase));
+      ctx.fillStyle = `rgba(93,173,226,${alpha})`;
+      ctx.fillRect(cell.x + 1, cell.y + 1, cw - 2, ch - 2);
+    });
+
+    t++;
+    requestAnimationFrame(draw);
+  }
+  draw();
+})();
+
+// ── SCROLL REVEAL ─────────────────────────────────────────────────────────────
+const observer = new IntersectionObserver(entries => {
+  entries.forEach((e, i) => {
+    if (e.isIntersecting) {
+      setTimeout(() => e.target.classList.add("visible"), i * 80);
+      observer.unobserve(e.target);
+    }
+  });
+}, { threshold: 0.1 });
+
+document.querySelectorAll(".reveal").forEach(el => observer.observe(el));
+
+// ── KPI COUNTER ANIMATION ─────────────────────────────────────────────────────
+function animateCounter(el, target, decimals = 2, duration = 1600) {
+  const start = performance.now();
+  function update(now) {
+    const progress = Math.min((now - start) / duration, 1);
+    const eased    = 1 - Math.pow(1 - progress, 3);
+    el.textContent = (target * eased).toFixed(decimals);
+    if (progress < 1) requestAnimationFrame(update);
+  }
+  requestAnimationFrame(update);
+}
+
+const kpiObserver = new IntersectionObserver(entries => {
+  if (entries[0].isIntersecting) {
+    animateCounter(document.getElementById("kpi-auroc"), 0.91);
+    animateCounter(document.getElementById("kpi-ks"),    0.64);
+    animateCounter(document.getElementById("kpi-gini"),  0.82);
+    kpiObserver.disconnect();
+  }
+}, { threshold: 0.5 });
+
+kpiObserver.observe(document.getElementById("kpis"));
+
+// ── ROC CHART ─────────────────────────────────────────────────────────────────
+(function() {
+  const canvas = document.getElementById("roc-chart");
+  const ctx    = canvas.getContext("2d");
+
+  const W = canvas.offsetWidth || 420;
+  const H = 300;
+  canvas.width  = W;
+  canvas.height = H;
+
+  const PAD = { top: 20, right: 20, bottom: 45, left: 50 };
+  const PW  = W - PAD.left - PAD.right;
+  const PH  = H - PAD.top  - PAD.bottom;
+
+  function toX(v) { return PAD.left + v * PW; }
+  function toY(v) { return PAD.top  + (1 - v) * PH; }
+
+  // Simulate realistic ROC curves
+  function rocPoints(auroc, n = 80) {
+    const pts = [[0, 0]];
+    const target = auroc;
+    for (let i = 1; i < n; i++) {
+      const fpr = i / n;
+      const tpr = Math.min(1, Math.pow(fpr, 1 / (target * 3 - 0.5))
+                            * (0.95 + Math.random() * 0.05));
+      pts.push([fpr, tpr]);
+    }
+    pts.push([1, 1]);
+    return pts;
+  }
+
+  const curves = [
+    { pts: rocPoints(0.87), color: "#5DADE2", label: "Logistic Regression  AUROC=0.87" },
+    { pts: rocPoints(0.91), color: "#FBBF24", label: "XGBoost              AUROC=0.91" },
+  ];
+
+  // Grid
+  ctx.strokeStyle = "rgba(46,134,193,0.15)";
+  ctx.lineWidth   = 1;
+  [0, 0.25, 0.5, 0.75, 1].forEach(v => {
+    ctx.beginPath(); ctx.moveTo(toX(v), toY(0)); ctx.lineTo(toX(v), toY(1)); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(toX(0), toY(v)); ctx.lineTo(toX(1), toY(v)); ctx.stroke();
+  });
+
+  // Diagonal
+  ctx.setLineDash([4, 4]);
+  ctx.strokeStyle = "rgba(255,255,255,0.2)";
+  ctx.beginPath(); ctx.moveTo(toX(0), toY(0)); ctx.lineTo(toX(1), toY(1)); ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Curves
+  curves.forEach(({ pts, color }) => {
+    ctx.strokeStyle = color;
+    ctx.lineWidth   = 2.5;
+    ctx.beginPath();
+    pts.forEach(([x, y], i) => i === 0 ? ctx.moveTo(toX(x), toY(y)) : ctx.lineTo(toX(x), toY(y)));
+    ctx.stroke();
+  });
+
+  // Axes labels
+  ctx.fillStyle  = "rgba(160,174,192,0.9)";
+  ctx.font       = "11px 'JetBrains Mono'";
+  ctx.textAlign  = "center";
+  ctx.fillText("False Positive Rate", PAD.left + PW/2, H - 8);
+  ctx.save();
+  ctx.translate(13, PAD.top + PH/2);
+  ctx.rotate(-Math.PI/2);
+  ctx.fillText("True Positive Rate", 0, 0);
+  ctx.restore();
+
+  // Tick labels
+  [0, 0.5, 1].forEach(v => {
+    ctx.textAlign = "center";
+    ctx.fillText(v.toFixed(1), toX(v), H - PAD.bottom + 14);
+    ctx.textAlign = "right";
+    ctx.fillText(v.toFixed(1), PAD.left - 6, toY(v) + 4);
+  });
+
+  // Legend
+  let ly = PAD.top + 16;
+  curves.forEach(({ color, label }) => {
+    ctx.fillStyle    = color;
+    ctx.fillRect(PAD.left + 8, ly - 7, 22, 3);
+    ctx.fillStyle    = "rgba(224,232,240,0.9)";
+    ctx.font         = "10px 'JetBrains Mono'";
+    ctx.textAlign    = "left";
+    ctx.fillText(label, PAD.left + 36, ly);
+    ly += 18;
+  });
+})();
+
+// ── IV DISPLAY ────────────────────────────────────────────────────────────────
+(function() {
+  const data = [
+    { feature: "delinquency_indicator", iv: 0.538, strength: "Very Strong", color: "#F87171" },
+    { feature: "loan_age",              iv: 0.374, strength: "Strong",      color: "#FBBF24" },
+    { feature: "credit_score",          iv: 0.304, strength: "Strong",      color: "#FBBF24" },
+    { feature: "orig_dti",              iv: 0.285, strength: "Medium",      color: "#34D399" },
+    { feature: "orig_interest_rate",    iv: 0.159, strength: "Medium",      color: "#34D399" },
+    { feature: "orig_cltv",             iv: 0.125, strength: "Medium",      color: "#34D399" },
+    { feature: "hpi_change",            iv: 0.090, strength: "Weak",        color: "#5DADE2" },
+    { feature: "ur_3m_lag",             iv: 0.065, strength: "Weak",        color: "#5DADE2" },
+  ];
+
+  const container = document.getElementById("iv-display");
+  const MAX_IV    = 0.55;
+
+  data.forEach(({ feature, iv, strength, color }, idx) => {
+    const row = document.createElement("div");
+    row.className = "iv-row";
+    row.style.animationDelay = `${idx * 60}ms`;
+    row.innerHTML = `
+      <span class="iv-feature">${feature}</span>
+      <div class="iv-bar-track">
+        <div class="iv-bar-fill" style="width:0%;background:${color};"
+             data-target="${(iv/MAX_IV*100).toFixed(1)}"></div>
+      </div>
+      <span class="iv-value">${iv.toFixed(3)}</span>
+      <span class="badge" style="font-size:0.6rem;background:${color}22;color:${color};">${strength}</span>
+    `;
+    container.appendChild(row);
+  });
+
+  // Animate bars when section enters viewport
+  const barObserver = new IntersectionObserver(entries => {
+    if (entries[0].isIntersecting) {
+      document.querySelectorAll(".iv-bar-fill").forEach((bar, i) => {
+        setTimeout(() => {
+          bar.style.width = bar.dataset.target + "%";
+        }, i * 80);
+      });
+      barObserver.disconnect();
+    }
+  }, { threshold: 0.3 });
+
+  barObserver.observe(container);
+})();
+
+// ── PSI CHART ─────────────────────────────────────────────────────────────────
+(function() {
+  const canvas = document.getElementById("psi-chart");
+  const ctx    = canvas.getContext("2d");
+  const W      = canvas.offsetWidth || 700;
+  const H      = 180;
+  canvas.width  = W;
+  canvas.height = H;
+
+  const psiData = [
+    { feature: "delinq.", psi: 0.08 },
+    { feature: "loan_age", psi: 0.61 },
+    { feature: "credit_score", psi: 0.07 },
+    { feature: "orig_dti", psi: 0.09 },
+    { feature: "orig_rate", psi: 0.96 },
+    { feature: "orig_cltv", psi: 0.11 },
+    { feature: "hpi_chg", psi: 0.14 },
+    { feature: "ur_lag", psi: 0.12 },
+  ];
+
+  const PAD  = { top: 20, right: 20, bottom: 40, left: 50 };
+  const PW   = W - PAD.left - PAD.right;
+  const PH   = H - PAD.top  - PAD.bottom;
+  const maxY = 1.1;
+  const bw   = PW / psiData.length - 8;
+
+  ctx.fillStyle  = "rgba(10,22,40,0)";
+  ctx.fillRect(0, 0, W, H);
+
+  // Threshold lines
+  [{ v: 0.10, label: "0.10 Stable",  color: "#34D399" },
+   { v: 0.25, label: "0.25 Investigate", color: "#FBBF24" }].forEach(({ v, label, color }) => {
+    const y = PAD.top + (1 - v/maxY) * PH;
+    ctx.setLineDash([4, 4]);
+    ctx.strokeStyle = color + "99";
+    ctx.lineWidth   = 1.2;
+    ctx.beginPath(); ctx.moveTo(PAD.left, y); ctx.lineTo(W - PAD.right, y); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle  = color + "cc";
+    ctx.font       = "9px 'JetBrains Mono'";
+    ctx.textAlign  = "right";
+    ctx.fillText(label, W - PAD.right - 4, y - 4);
+  });
+
+  // Bars
+  psiData.forEach(({ feature, psi }, i) => {
+    const x    = PAD.left + i * (PW / psiData.length) + 4;
+    const barH = (psi / maxY) * PH;
+    const y    = PAD.top + PH - barH;
+    const color = psi > 0.25 ? "#F87171" : psi > 0.10 ? "#FBBF24" : "#34D399";
+
+    ctx.fillStyle = color + "bb";
+    ctx.fillRect(x, y, bw, barH);
+
+    // Value label
+    ctx.fillStyle = color;
+    ctx.font      = "9px 'JetBrains Mono'";
+    ctx.textAlign = "center";
+    ctx.fillText(psi.toFixed(2), x + bw/2, y - 4);
+
+    // Feature label
+    ctx.fillStyle = "rgba(160,174,192,0.8)";
+    ctx.fillText(feature, x + bw/2, PAD.top + PH + 14);
+  });
+})();
+</script>
+</body>
+</html>
