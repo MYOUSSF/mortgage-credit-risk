@@ -79,7 +79,7 @@ Origination years 2000â€“2020 yield 200M+ loan-month records spanning the 2004â€
 ### Setup
 
 ```bash
-git clone https://github.com/your-username/mortgage-credit-risk
+git clone https://github.com/MYOUSSF/mortgage-credit-risk
 cd mortgage-credit-risk
 pip install -r requirements.txt
 ```
