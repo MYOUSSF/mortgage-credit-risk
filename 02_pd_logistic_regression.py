@@ -642,15 +642,7 @@ def main() -> None:
     log.info("\n  Scorecard (training set — high-risk to low-risk):")
     log.info("\n%s", scorecard.to_string(index=False))
 
-    # ROC plot — y arrays already held in score_data from the eval loop
-    plot_roc(
-        {k: metrics_df.loc[metrics_df["split"] == k, "n_defaults"].values
-         for k in ["Train", "OOS", "OOT"]},
-        score_data,
-        FIG_DIR / "pd_lr_roc.png",
-    )
-
-    # Rebuild y_true dict properly for plot_roc
+    # Build y_true / y_score dicts from the lean score frames and plot ROC
     y_true_dict  = {}
     y_score_dict = {}
     for frame, label in zip(score_frames, ["Train", "OOS", "OOT"]):
