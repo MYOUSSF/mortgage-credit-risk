@@ -39,10 +39,6 @@ Outputs
   data/processed/lgd_oot.parquet
   data/processed/pd_iv_summary.csv
   data/processed/pd_psi_summary.csv
-
-Next Step
----------
-  python 02_pd_logistic_regression.py
 =============================================================================
 """
 
@@ -175,6 +171,78 @@ _ZBC_LABELS = {
     "09": "REO",             "15": "note sale",
     "16": "reperforming",    "96": "non-standard",
 }
+
+
+# =============================================================================
+# DATE PARSING HELPER
+# =============================================================================
+
+# Freddie Mac servicer files use "MM/YYYY" for monthly_reporting_period and
+# zero_balance_date.  However the exact format can vary across dataset
+# vintages (e.g. some exports use "YYYYMM" without a separator).  This helper
+# tries each known format in sequence so the pipeline is robust to both.
+#
+# FIX: The original code used format="%m/%Y" directly inside clean_perf(),
+# which is correct for "MM/YYYY" strings.  If the on-disk format is actually
+# "YYYYMM" (no separator), every value parses as NaT — silently — causing
+# split_pd() to receive an empty in_sample and crashing sklearn with:
+#   ValueError: With n_samples=0, test_size=0.3 … the resulting train set
+#   will be empty.
+
+_PERIOD_FORMATS = [
+    "%m/%Y",    # "01/2000"  — standard Freddie Mac servicer format
+    "%Y%m",     # "200001"   — compact format sometimes used in older files
+    "%m-%Y",    # "01-2000"  — dash-separated variant
+    "%Y-%m",    # "2000-01"  — ISO-like variant
+    "%Y-%m-%d", # "2000-01-01" — full date variant
+]
+
+
+def _parse_period(series: pd.Series, col_name: str = "date",
+                  warn_threshold: float = 0.01) -> pd.Series:
+    """
+    Robustly parse a Freddie Mac period column (monthly_reporting_period or
+    zero_balance_date) by trying each format in _PERIOD_FORMATS in order.
+
+    The first format that produces a non-trivial parse rate (>50% non-NaT)
+    is adopted for the whole column.  If no format clears that bar, pandas'
+    own inference is used as a last resort.
+
+    A WARNING is emitted when the NaT rate exceeds warn_threshold so silent
+    failures become immediately visible in the log.  Pass warn_threshold=1.0
+    to suppress the warning entirely for structurally sparse columns such as
+    zero_balance_date, which is blank for all active (non-exited) loans and
+    therefore legitimately has a very high NaT rate.
+    """
+    s = series.astype(str).str.strip()
+    best: pd.Series | None = None
+    best_valid = -1
+
+    for fmt in _PERIOD_FORMATS:
+        parsed = pd.to_datetime(s, format=fmt, errors="coerce")
+        n_valid = parsed.notna().sum()
+        if n_valid > best_valid:
+            best_valid = n_valid
+            best = parsed
+        # Accept the first format that parses more than half the rows
+        if n_valid / max(len(s), 1) > 0.5:
+            break
+
+    # Final fallback: pandas inference (slowest but most flexible)
+    if best is None or best_valid == 0:
+        best = pd.to_datetime(s, errors="coerce", infer_datetime_format=True)
+
+    nat_rate = best.isna().mean()
+    if nat_rate > warn_threshold:
+        log.warning(
+            "  %s: %.1f%% of values parsed as NaT — check raw date format "
+            "(sample values: %s)",
+            col_name,
+            nat_rate * 100,
+            series.dropna().head(3).tolist(),
+        )
+
+    return best
 
 
 # =============================================================================
@@ -322,11 +390,20 @@ def clean_orig(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def clean_perf(df: pd.DataFrame) -> pd.DataFrame:
-    """Type-cast and derive fields for the servicer (performance) file."""
+    """Type-cast and derive fields for the servicer (performance) file.
+
+    FIX: replaced bare pd.to_datetime(…, format="%m/%Y") with the robust
+    _parse_period() helper for both monthly_reporting_period (→ report_date)
+    and zero_balance_date.  The helper tries all known Freddie Mac date
+    formats in sequence and warns loudly if the NaT rate is high, preventing
+    the silent all-NaT parse that caused split_pd() to receive an empty
+    in_sample and crash sklearn with n_samples=0.
+    """
     out = df.copy()
 
-    out["report_date"] = pd.to_datetime(
-        out["monthly_reporting_period"].str.strip(), format="%m/%Y", errors="coerce"
+    # ── FIX: use robust multi-format parser instead of a single hard-coded fmt ──
+    out["report_date"] = _parse_period(
+        out["monthly_reporting_period"], col_name="monthly_reporting_period"
     )
 
     for col in ["loan_age", "current_upb", "actual_loss",
@@ -337,8 +414,10 @@ def clean_perf(df: pd.DataFrame) -> pd.DataFrame:
         if col in out.columns:
             out[col] = pd.to_numeric(out[col], errors="coerce")
 
-    out["zero_balance_date"] = pd.to_datetime(
-        out["zero_balance_date"].str.strip(), format="%m/%Y", errors="coerce"
+    # zero_balance_date is blank for all active (non-exited) loans, so a high
+    # NaT rate is structurally expected — suppress the warning entirely.
+    out["zero_balance_date"] = _parse_period(
+        out["zero_balance_date"], col_name="zero_balance_date", warn_threshold=1.0
     )
 
     # Delinquency: 'X' = current (0 months past due), numeric strings otherwise
@@ -421,7 +500,7 @@ def engineer_features(merged: pd.DataFrame,
 
     # ── Unemployment rate (3-month lag) ───────────────────────────────────
     if ur is not None and "report_date" in df.columns:
-        ur_indexed = ur.set_index("date")["unemployment_rate"]
+        ur_indexed = ur.set_index("date")["unemployment_rate"]  # noqa: F841
         lag_dates  = df["report_date"] - pd.DateOffset(months=3)
         # Nearest available observation (tolerance = 45 days)
         df["ur_3m_lag"] = pd.merge_asof(
@@ -523,9 +602,36 @@ def split_pd(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame
     OOT (out-of-time)      : report_date >= OOT_CUTOFF
     OOS (out-of-sample)    : random 30% of report_date < OOT_CUTOFF
     Train                  : remaining 70% of in-sample
+
+    FIX: added a NaT-rate diagnostic and a descriptive ValueError when
+    in_sample is empty, replacing the cryptic sklearn n_samples=0 crash.
+    The most common cause is _parse_period() silently producing all-NaT
+    values, which makes every NaT < OOT_CUTOFF comparison evaluate to
+    False, leaving in_sample with zero rows.
     """
+    nat_rate = df["report_date"].isna().mean()
+    if nat_rate > 0.01:
+        log.warning(
+            "  split_pd: %.1f%% of report_date values are NaT — "
+            "date parsing in clean_perf() may have failed.",
+            nat_rate * 100,
+        )
+
     in_sample = df[df["report_date"] < OOT_CUTOFF].copy()
     oot        = df[df["report_date"] >= OOT_CUTOFF].copy()
+
+    # ── FIX: guard against empty in_sample before calling sklearn ────────
+    if in_sample.empty:
+        raise ValueError(
+            f"split_pd: in_sample is empty after applying OOT_CUTOFF "
+            f"({OOT_CUTOFF.date()}).  "
+            f"report_date range in data: "
+            f"{df['report_date'].min()} – {df['report_date'].max()}  "
+            f"(NaT rate: {nat_rate:.1%}).  "
+            "Check that _parse_period() is correctly parsing "
+            "monthly_reporting_period from the raw servicer files."
+        )
+
     train, oos = train_test_split(in_sample, test_size=OOS_FRAC,
                                   random_state=SEED, shuffle=True)
     log.info(
@@ -536,12 +642,37 @@ def split_pd(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame
 
 
 def split_lgd(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Same temporal / random split applied to the LGD dataset."""
+    """Same temporal / random split applied to the LGD dataset.
+
+    FIX: added matching NaT-rate diagnostic and empty in_sample guard,
+    consistent with the fix applied to split_pd().
+    """
+    nat_rate = df["zero_balance_date"].isna().mean()
+    if nat_rate > 0.01:
+        log.warning(
+            "  split_lgd: %.1f%% of zero_balance_date values are NaT — "
+            "date parsing in clean_perf() may have failed.",
+            nat_rate * 100,
+        )
+
     in_sample = df[df["zero_balance_date"] < OOT_CUTOFF].copy()
     oot        = df[df["zero_balance_date"] >= OOT_CUTOFF].copy()
+
+    if in_sample.empty:
+        log.warning(
+            "  split_lgd: in_sample is empty after OOT cutoff — "
+            "zero_balance_date range: %s – %s  (NaT rate: %.1f%%).  "
+            "OOS split skipped.",
+            df["zero_balance_date"].min(),
+            df["zero_balance_date"].max(),
+            nat_rate * 100,
+        )
+        return in_sample, pd.DataFrame(), oot
+
     if len(in_sample) < 5:
         log.warning("  Very few in-sample LGD rows — OOS split skipped.")
         return in_sample, pd.DataFrame(), oot
+
     train, oos = train_test_split(in_sample, test_size=OOS_FRAC,
                                   random_state=SEED, shuffle=True)
     return train, oos, oot
