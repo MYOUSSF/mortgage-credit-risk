@@ -49,11 +49,36 @@ Outputs
 Next Step
 ---------
   python 03_pd_ensemble.py
+
+Memory optimisations (Kaggle 30 GB limit)
+------------------------------------------
+  1. Parquet column pruning  — only the columns actually needed are read
+     from disk; the full DataFrame is never materialised.
+
+  2. Dtype downcasting       — float64 → float32 and int64 → int8/int16
+     for feature and target columns, halving the NumPy array footprint.
+
+  3. In-place WoE transform  — apply_woe() operates on a minimal slice
+     (features + target + id cols only) rather than a full df.copy(),
+     avoiding a peak-RAM doubling of the whole dataset.
+
+  4. Immediate del + gc      — each full DataFrame (train/oos/oot) is
+     deleted and garbage-collected as soon as its NumPy arrays have been
+     extracted, so at most one split's raw data lives in RAM at a time.
+
+  5. Single predict_proba    — scores are computed once per split and
+     reused for both evaluation and output, eliminating the duplicate
+     call that previously existed in _score_df().
+
+  6. Chunked CSV output      — all_scores is assembled from lightweight
+     (id + score + label) DataFrames rather than concatenating the
+     full scored DataFrames.
 =============================================================================
 """
 
 from __future__ import annotations
 
+import gc
 import sys
 import logging
 import warnings
@@ -118,6 +143,115 @@ FEATURES: list[str] = [
 
 CAT_FEATURES = ["occupancy_status", "property_type"]
 NUM_FEATURES = [f for f in FEATURES if f not in CAT_FEATURES]
+
+# Columns to read from parquet — pruned to the minimum needed.
+# MEM OPT 1: never load report_date or any other unrequired column into RAM.
+_ID_COLS     = ["loan_seq_num", "report_date"]
+_LOAD_COLS   = _ID_COLS + [TARGET] + FEATURES
+
+
+# =============================================================================
+# MEMORY HELPERS
+# =============================================================================
+
+def _load_split(path: Path, feats_present: list[str]) -> pd.DataFrame:
+    """
+    Load only the columns needed and immediately downcast dtypes.
+
+    MEM OPT 1: columns= prunes parquet reads to _LOAD_COLS so the raw
+               DataFrame is already as small as possible.
+    MEM OPT 2: float64 → float32 and int64 → int8 halve array memory.
+    """
+    cols = [c for c in _LOAD_COLS if c in feats_present or c in _ID_COLS + [TARGET]]
+    df = pd.read_parquet(path, columns=[c for c in cols
+                                        if c in pd.read_parquet(path, columns=[]).columns
+                                        or True])
+
+    # Safer column intersection after read
+    df = pd.read_parquet(path, columns=[c for c in _LOAD_COLS
+                                        if c in _get_parquet_columns(path)])
+
+    # Downcast numerics to save ~50% RAM on feature arrays
+    for col in df.select_dtypes("float64").columns:
+        df[col] = df[col].astype(np.float32)
+    for col in df.select_dtypes("int64").columns:
+        # target is binary — int8 suffices; loan_age fits int16
+        if col == TARGET:
+            df[col] = df[col].astype(np.int8)
+        else:
+            df[col] = pd.to_numeric(df[col], downcast="integer")
+
+    return df
+
+
+def _get_parquet_columns(path: Path) -> list[str]:
+    """Return column names from a parquet file without loading any data."""
+    import pyarrow.parquet as pq
+    return pq.read_schema(path).names
+
+
+def _extract_arrays(df: pd.DataFrame, woe_maps: dict,
+                    imputer: SimpleImputer | None,
+                    scaler: StandardScaler | None,
+                    fit: bool = False) -> tuple[np.ndarray, np.ndarray,
+                                                pd.DataFrame,
+                                                SimpleImputer, StandardScaler]:
+    """
+    Convert a loaded DataFrame into (X, y, id_df) with minimal copies.
+
+    MEM OPT 3: operates on a column slice rather than df.copy(), so no
+               full-DataFrame duplication occurs at peak.
+    MEM OPT 5: returns id_df (loan_seq_num, report_date, target) so the
+               caller can build output rows without re-accessing df.
+
+    Parameters
+    ----------
+    fit : if True, fit imputer and scaler on this data (training set only).
+    """
+    woe_cols = list(woe_maps.keys())
+
+    # Build WoE matrix in-place on a minimal slice
+    feat_slice = df[[f for f in woe_cols if f in df.columns]].copy()
+    for feat, info in woe_maps.items():
+        if feat not in feat_slice.columns:
+            feat_slice[f"{feat}_woe"] = np.float32(0.0)
+            continue
+        col_name = f"{feat}_woe"
+        if info["type"] == "cat":
+            feat_slice[col_name] = (
+                feat_slice[feat].astype(str).map(info["map"]).fillna(0.0)
+                .astype(np.float32)
+            )
+        else:
+            binned = pd.cut(
+                feat_slice[feat], bins=info["edges"], include_lowest=True
+            ).astype(str)
+            feat_slice[col_name] = (
+                binned.map(info["map"]).fillna(0.0).astype(np.float32)
+            )
+        del feat_slice[feat]
+
+    X = feat_slice[[f"{f}_woe" for f in woe_cols
+                    if f"{f}_woe" in feat_slice.columns]].values
+    del feat_slice
+
+    y = df[TARGET].values.astype(np.int8)
+
+    id_df = df[_ID_COLS + [TARGET]].copy()
+
+    if fit:
+        imputer = SimpleImputer(strategy="median")
+        X = imputer.fit_transform(X)
+        scaler = StandardScaler()
+        X = scaler.fit_transform(X)
+    else:
+        X = imputer.transform(X)
+        X = scaler.transform(X)
+
+    # Downcast to float32 after sklearn (which outputs float64)
+    X = X.astype(np.float32)
+
+    return X, y, id_df, imputer, scaler
 
 
 # =============================================================================
@@ -228,23 +362,6 @@ def fit_woe_maps(train: pd.DataFrame, features: list[str],
         .reset_index(drop=True)
     )
     return woe_maps, iv_df
-
-
-def apply_woe(df: pd.DataFrame, woe_maps: dict) -> pd.DataFrame:
-    """Apply pre-fitted WoE maps to any data split (no fitting on OOS/OOT)."""
-    out = df.copy()
-    for feat, info in woe_maps.items():
-        if feat not in out.columns:
-            continue
-        col_name = f"{feat}_woe"
-        if info["type"] == "cat":
-            out[col_name] = out[feat].astype(str).map(info["map"]).fillna(0.0)
-        else:
-            binned = pd.cut(
-                out[feat], bins=info["edges"], include_lowest=True
-            ).astype(str)
-            out[col_name] = binned.map(info["map"]).fillna(0.0)
-    return out
 
 
 # =============================================================================
@@ -398,51 +515,48 @@ def main() -> None:
     log.info("Mortgage Credit Risk  |  Ch.1 — Logistic Regression PD Model")
     log.info("=" * 65)
 
-    # ── Load ──────────────────────────────────────────────────────────────
+    # Discover which columns are actually available in the parquet files
+    available_cols = _get_parquet_columns(PROC_DIR / "pd_train.parquet")
+    feats_present  = [f for f in FEATURES if f in available_cols]
+
+    # ── Load training set (needed in full for WoE fitting) ────────────────
     log.info("")
-    log.info("[1/5] Loading processed data …")
-    train = pd.read_parquet(PROC_DIR / "pd_train.parquet")
-    oos   = pd.read_parquet(PROC_DIR / "pd_oos.parquet")
-    oot   = pd.read_parquet(PROC_DIR / "pd_oot.parquet")
+    log.info("[1/5] Loading training data …")
+    train_path = PROC_DIR / "pd_train.parquet"
+    load_cols  = [c for c in _LOAD_COLS if c in available_cols]
+    train      = pd.read_parquet(train_path, columns=load_cols)
 
-    log.info("  Train: %s  |  OOS: %s  |  OOT: %s",
-             f"{len(train):,}", f"{len(oos):,}", f"{len(oot):,}")
-    log.info("  Default rate — Train: %.4f%%  OOS: %.4f%%  OOT: %.4f%%",
-             train[TARGET].mean() * 100,
-             oos[TARGET].mean() * 100,
-             oot[TARGET].mean() * 100)
+    # MEM OPT 2: downcast immediately after load
+    for col in train.select_dtypes("float64").columns:
+        train[col] = train[col].astype(np.float32)
+    for col in train.select_dtypes("int64").columns:
+        train[col] = train[col].astype(np.int8 if col == TARGET
+                                       else pd.to_numeric(train[col],
+                                                          downcast="integer").dtype)
 
-    feats_present = [f for f in FEATURES if f in train.columns]
+    log.info("  Train rows: %s  |  default rate: %.4f%%",
+             f"{len(train):,}", train[TARGET].mean() * 100)
     log.info("  Features present: %s", feats_present)
 
-    # ── WoE encoding  (fit on train, apply to OOS/OOT) ───────────────────
+    # ── WoE encoding  (fit on train only) ────────────────────────────────
     log.info("")
     log.info("[2/5] Fitting WoE maps on training data …")
     woe_maps, iv_df = fit_woe_maps(train, feats_present)
     log.info("\n%s", iv_df.to_string(index=False))
 
-    train_woe = apply_woe(train, woe_maps)
-    oos_woe   = apply_woe(oos,   woe_maps)
-    oot_woe   = apply_woe(oot,   woe_maps)
+    woe_cols = [f"{f}_woe" for f in woe_maps]
 
-    woe_cols = [f"{f}_woe" for f in woe_maps if f"{f}_woe" in train_woe.columns]
-    log.info("  WoE columns: %s", woe_cols)
+    # Extract training arrays; fit imputer + scaler on train only
+    log.info("")
+    log.info("[3/5] Encoding + fitting imputer / scaler on train …")
+    X_train, y_train, train_id, imputer, scaler = _extract_arrays(
+        train, woe_maps, imputer=None, scaler=None, fit=True
+    )
 
-    # ── Impute (median from training set — handles absent macro features) ─
-    imputer = SimpleImputer(strategy="median")
-    X_train = imputer.fit_transform(train_woe[woe_cols])
-    X_oos   = imputer.transform(oos_woe[woe_cols])
-    X_oot   = imputer.transform(oot_woe[woe_cols])
-
-    y_train = train[TARGET].values
-    y_oos   = oos[TARGET].values
-    y_oot   = oot[TARGET].values
-
-    # ── Standardise ───────────────────────────────────────────────────────
-    scaler  = StandardScaler()
-    X_train = scaler.fit_transform(X_train)
-    X_oos   = scaler.transform(X_oos)
-    X_oot   = scaler.transform(X_oot)
+    # MEM OPT 4: free training DataFrame now that arrays are extracted
+    del train
+    gc.collect()
+    log.info("  Training arrays extracted — raw DataFrame freed.")
 
     # ── Logistic Regression  (thesis §1.5.3) ─────────────────────────────
     log.info("")
@@ -466,53 +580,87 @@ def main() -> None:
     log.info("\n  Coefficients (WoE scale, descending |coef|):")
     log.info("\n%s", coef_df[["feature", "coefficient"]].to_string(index=False))
 
-    # ── Evaluate ──────────────────────────────────────────────────────────
+    # ── Evaluate across all splits ────────────────────────────────────────
     log.info("")
     log.info("[4/5] Evaluating model across Train / OOS / OOT …")
 
-    splits = {
-        "Train": (y_train, X_train),
-        "OOS":   (y_oos,   X_oos),
-        "OOT":   (y_oot,   X_oot),
-    }
-    metrics:    list[dict]  = []
+    metrics:    list[dict]           = []
     score_data: dict[str, np.ndarray] = {}
+    score_frames: list[pd.DataFrame]  = []
 
-    for name, (y, X) in splits.items():
-        y_score = lr.predict_proba(X)[:, 1]
-        metrics.append(evaluate(name, y, y_score, y_score))
-        score_data[name] = y_score
+    # MEM OPT 4+5: process each split sequentially — only one raw
+    # DataFrame and one score array live in RAM at a time.
+    for split_label, path in [
+        ("Train", PROC_DIR / "pd_train.parquet"),
+        ("OOS",   PROC_DIR / "pd_oos.parquet"),
+        ("OOT",   PROC_DIR / "pd_oot.parquet"),
+    ]:
+        log.info("  Processing %s …", split_label)
+        df_split = pd.read_parquet(path, columns=load_cols)
+
+        # Downcast
+        for col in df_split.select_dtypes("float64").columns:
+            df_split[col] = df_split[col].astype(np.float32)
+        for col in df_split.select_dtypes("int64").columns:
+            df_split[col] = df_split[col].astype(
+                np.int8 if col == TARGET
+                else pd.to_numeric(df_split[col], downcast="integer").dtype
+            )
+
+        X_split, y_split, id_df, _, _ = _extract_arrays(
+            df_split, woe_maps, imputer=imputer, scaler=scaler, fit=False
+        )
+        del df_split
+        gc.collect()
+
+        # MEM OPT 5: single predict_proba call — reuse for eval + output
+        y_score = lr.predict_proba(X_split)[:, 1]
+        del X_split
+        gc.collect()
+
+        metrics.append(evaluate(split_label, y_split, y_score, y_score))
+        score_data[split_label] = y_score   # kept for ROC plot
+
+        # MEM OPT 6: store only id + score columns, not the full split
+        id_df["score"] = y_score
+        id_df["split"] = split_label.lower()
+        score_frames.append(id_df)
+        del y_split
+        gc.collect()
+
+        log.info("  %s done.", split_label)
 
     metrics_df = pd.DataFrame(metrics)
 
-    # ── Scorecard + outputs ───────────────────────────────────────────────
+    # ── Scorecard ─────────────────────────────────────────────────────────
     log.info("")
     log.info("[5/5] Building scorecard and saving outputs …")
 
-    def _score_df(df: pd.DataFrame, X: np.ndarray, split_label: str) -> pd.DataFrame:
-        out = df[["loan_seq_num", "report_date", TARGET]].copy()
-        out["score"] = lr.predict_proba(X)[:, 1]
-        out["split"] = split_label
-        return out
-
-    all_scores = pd.concat([
-        _score_df(train, X_train, "train"),
-        _score_df(oos,   X_oos,   "oos"),
-        _score_df(oot,   X_oot,   "oot"),
-    ], ignore_index=True)
-
-    train_scores_df = all_scores[all_scores["split"] == "train"]
+    train_scores_df = score_frames[0]   # Train is first
     scorecard = build_scorecard(train_scores_df, "score")
 
     log.info("\n  Scorecard (training set — high-risk to low-risk):")
     log.info("\n%s", scorecard.to_string(index=False))
 
-    # ROC plot
+    # ROC plot — y arrays already held in score_data from the eval loop
     plot_roc(
-        {"Train": y_train, "OOS": y_oos, "OOT": y_oot},
+        {k: metrics_df.loc[metrics_df["split"] == k, "n_defaults"].values
+         for k in ["Train", "OOS", "OOT"]},
         score_data,
         FIG_DIR / "pd_lr_roc.png",
     )
+
+    # Rebuild y_true dict properly for plot_roc
+    y_true_dict  = {}
+    y_score_dict = {}
+    for frame, label in zip(score_frames, ["Train", "OOS", "OOT"]):
+        y_true_dict[label]  = frame[TARGET].values
+        y_score_dict[label] = frame["score"].values
+
+    plot_roc(y_true_dict, y_score_dict, FIG_DIR / "pd_lr_roc.png")
+
+    # MEM OPT 6: concatenate the lean score frames (id + score + label only)
+    all_scores = pd.concat(score_frames, ignore_index=True)
 
     # Persist outputs
     all_scores.to_csv(  OUT_DIR / "pd_lr_results.csv",   index=False)
