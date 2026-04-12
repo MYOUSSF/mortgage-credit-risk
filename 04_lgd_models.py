@@ -191,11 +191,24 @@ def _encode_categoricals(train: pd.DataFrame, oos: pd.DataFrame,
 
 def prepare(train: pd.DataFrame, oos: pd.DataFrame,
             oot: pd.DataFrame) -> tuple:
-    """Encode, impute, and return arrays for training and evaluation."""
+    """Encode, impute, and return arrays for training and evaluation.
+
+    FIX: SimpleImputer drops columns that are entirely NaN (no median to
+    compute), so the output matrix can have fewer columns than len(feats).
+    We now track surviving features by checking which columns have at least
+    one non-NaN value in the training set before passing to the imputer.
+    This keeps feats aligned with the imputer output so that feature
+    importance indices match correctly downstream.
+    """
     feats = [f for f in FEATURES if f in train.columns]
     train, oos, oot = _encode_categoricals(
         train.copy(), oos.copy(), oot.copy(), CAT_FEATURES
     )
+
+    # Drop columns that are entirely NaN in training — imputer cannot
+    # compute a median for them and will silently drop them from output.
+    feats = [f for f in feats if train[f].notna().any()]
+
     imputer = SimpleImputer(strategy="median")
     X_tr = imputer.fit_transform(train[feats])
     X_oo = imputer.transform(oos[feats])  if len(oos) else np.empty((0, len(feats)))

@@ -93,6 +93,27 @@ except ImportError:
     print("ERROR: xgboost not installed.")
     sys.exit(1)
 
+
+# =============================================================================
+# GPU DETECTION  (mirrors 03_pd_ensemble.py)
+# =============================================================================
+
+def _detect_gpu() -> str:
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            gpus = [g.strip() for g in result.stdout.strip().splitlines() if g.strip()]
+            log.info("[GPU] %d GPU(s) found: %s", len(gpus), ", ".join(gpus))
+            return "cuda"
+    except Exception:
+        pass
+    log.info("[CPU] No GPU detected — using device='cpu'.")
+    return "cpu"
+
 # =============================================================================
 # LOGGING
 # =============================================================================
@@ -107,6 +128,8 @@ logging.basicConfig(
     ],
 )
 log = logging.getLogger(__name__)
+
+DEVICE = _detect_gpu()  # called after log is initialised
 
 
 # =============================================================================
@@ -202,6 +225,14 @@ def prepare(train: pd.DataFrame,
     feats = [f for f in FEATURES if f in train.columns]
     train, oos = _encode_categoricals(train.copy(), oos.copy(), CAT_FEATURES)
 
+    # FIX: drop columns that are entirely NaN in the training set.
+    # SimpleImputer cannot compute a median for all-NaN columns and silently
+    # drops them from the output matrix, causing a shape mismatch between
+    # shap_values (n, n_surviving) and the feats list (n_original).
+    # hpi_change and ur_3m_lag are the typical culprits when macro files
+    # are absent — both are all-NaN and contribute no signal anyway.
+    feats = [f for f in feats if train[f].notna().any()]
+
     imputer = SimpleImputer(strategy="median")
     X_tr = imputer.fit_transform(train[feats])
     X_oo = imputer.transform(oos[feats])
@@ -244,9 +275,8 @@ def retrain_xgboost(X_tr: np.ndarray, y_tr: np.ndarray,
         reg_lambda=1.0,
         eval_metric="auc",
         tree_method="hist",
-        device="cpu",          # SHAP TreeExplainer runs on CPU
+        device=DEVICE,         # auto-detected; SHAP TreeExplainer works with GPU-trained models
         random_state=SEED,
-        n_jobs=-1,
         early_stopping_rounds=20,
         scale_pos_weight=spw,
     )

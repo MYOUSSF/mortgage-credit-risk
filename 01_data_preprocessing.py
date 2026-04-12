@@ -163,13 +163,13 @@ LGD_FEATURES = [
 # Zero-balance codes treated as default events.
 # 01 = prepayment (explicitly excluded).
 # 96 = non-standard disposition (observed in sample data — treated as default).
-DEFAULT_CODES = {"02", "03", "06", "09", "15", "16", "96"}
+DEFAULT_CODES = {"02", "03", "06", "09", "15"}
 
 _ZBC_LABELS = {
     "01": "prepayment",      "02": "3rd-party sale",
     "03": "short sale",      "06": "repurchase",
     "09": "REO",             "15": "note sale",
-    "16": "reperforming",    "96": "non-standard",
+    # "16": "reperforming",    "96": "non-standard",
 }
 
 
