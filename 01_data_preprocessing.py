@@ -440,19 +440,30 @@ def clean_perf(df: pd.DataFrame) -> pd.DataFrame:
 # FEATURE ENGINEERING
 # =============================================================================
 
-def _nearest_hpi(hpi: pd.DataFrame, zip3: str, target_date: pd.Timestamp,
-                 cache: dict) -> float:
-    """Return HPI for (zip3, nearest quarter) — cached for speed."""
-    if hpi is None or pd.isna(target_date):
-        return np.nan
-    key = (zip3, target_date.year, (target_date.month - 1) // 3 + 1)
-    if key in cache:
-        return cache[key]
-    sub = hpi[(hpi["zip3"] == zip3) & (hpi["year"] == key[1])
-              & (hpi["quarter"] == key[2])]
-    val = float(sub["hpi_index"].iloc[0]) if len(sub) else np.nan
-    cache[key] = val
-    return val
+def _build_hpi_lookup(hpi: pd.DataFrame) -> pd.DataFrame:
+    """
+    Pre-compute a (zip3, year, quarter) → hpi_index lookup table.
+
+    Called once after load_hpi() so that engineer_features() can resolve
+    all HPI values with two vectorized merges instead of a Python loop.
+    """
+    return (
+        hpi[["zip3", "year", "quarter", "hpi_index"]]
+        .drop_duplicates(subset=["zip3", "year", "quarter"])
+        .reset_index(drop=True)
+    )
+
+
+def _hpi_keys(date_series: pd.Series, zip3_series: pd.Series) -> pd.DataFrame:
+    """
+    Derive (zip3, year, quarter) join keys from date and zip3 columns.
+    Returns a DataFrame aligned to the input index.
+    """
+    return pd.DataFrame({
+        "zip3":    zip3_series.str.zfill(3).where(zip3_series.notna(), ""),
+        "year":    date_series.dt.year,
+        "quarter": (date_series.dt.month - 1) // 3 + 1,
+    })
 
 
 def engineer_features(merged: pd.DataFrame,
@@ -466,24 +477,53 @@ def engineer_features(merged: pd.DataFrame,
     hpi_change          : ratio of origination HPI to current HPI (PD)
     hpi_change_since_orig: same ratio stored separately for LGD
     ur_3m_lag           : unemployment rate lagged 3 months
+
+    HPI strategy
+    ------------
+    Previously used a Python ``iterrows`` loop with a per-row dict cache —
+    O(n) Python overhead for every row.  Replaced with two vectorized merges
+    on a pre-built (zip3, year, quarter) lookup table: zero Python-level
+    iteration regardless of dataset size.
     """
     df = merged.copy()
 
     # ── HPI change ratio ──────────────────────────────────────────────────
     if hpi is not None and "zip3" in df.columns and "orig_date" in df.columns:
-        log.debug("  Computing HPI change ratios …")
-        cache: dict = {}
+        log.debug("  Computing HPI change ratios (vectorized merge) …")
 
-        hpi_orig_vals = []
-        hpi_curr_vals = []
+        hpi_lookup = _build_hpi_lookup(hpi)
 
-        for _, row in df[["zip3", "orig_date", "report_date"]].iterrows():
-            z = str(row["zip3"]).zfill(3) if pd.notna(row["zip3"]) else ""
-            hpi_orig_vals.append(_nearest_hpi(hpi, z, row["orig_date"], cache))
-            hpi_curr_vals.append(_nearest_hpi(hpi, z, row["report_date"], cache))
+        # Derive join keys for origination date and current report date
+        orig_keys = _hpi_keys(df["orig_date"],   df["zip3"]).add_suffix("_orig")
+        curr_keys = _hpi_keys(df["report_date"],  df["zip3"]).add_suffix("_curr")
 
-        df["hpi_orig"]  = hpi_orig_vals
-        df["hpi_curr"]  = hpi_curr_vals
+        # Attach keys to a slim working frame (preserves df index)
+        work = pd.concat([orig_keys, curr_keys], axis=1)
+        work.index = df.index
+
+        # Merge origination HPI
+        work = work.merge(
+            hpi_lookup.rename(columns={
+                "zip3": "zip3_orig", "year": "year_orig",
+                "quarter": "quarter_orig", "hpi_index": "hpi_orig",
+            }),
+            on=["zip3_orig", "year_orig", "quarter_orig"],
+            how="left",
+        )
+
+        # Merge current HPI
+        work = work.merge(
+            hpi_lookup.rename(columns={
+                "zip3": "zip3_curr", "year": "year_curr",
+                "quarter": "quarter_curr", "hpi_index": "hpi_curr",
+            }),
+            on=["zip3_curr", "year_curr", "quarter_curr"],
+            how="left",
+        )
+
+        df["hpi_orig"] = work["hpi_orig"].values
+        df["hpi_curr"] = work["hpi_curr"].values
+
         # Ratio > 1 means prices have risen since origination (positive equity)
         # Ratio < 1 means prices have fallen (negative equity → higher default risk)
         with np.errstate(divide="ignore", invalid="ignore"):
