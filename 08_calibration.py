@@ -187,43 +187,68 @@ class IsotonicCalibrator:
 
 class TemperatureCalibrator:
     """
-    Temperature scaling: P_cal = σ(logit(P_raw) / T).
+    Temperature scaling with bias correction: P_cal = σ((logit(P_raw) − b) / T).
+
+    Pure temperature scaling (T only) cannot fix absolute bias caused by
+    class reweighting (scale_pos_weight / class_weight='balanced'), because
+    it scales all logits by the same factor without shifting them.  A model
+    trained with scale_pos_weight=155 produces logits whose mean is ~+1.2
+    (≈23% predicted PD) on a population with a 0.64% true base rate.
+    Dividing by any T > 0 preserves the rank order but cannot shift the
+    distribution to match the observed base rate.
+
+    The fix adds a bias term b (the intercept) to the temperature model,
+    making it P_cal = σ((logit(P_raw) / T) + b).  This is equivalent to
+    fitting a 1D logistic regression on logit(P_raw)/T, which is exactly
+    what Platt scaling does — but we retain the temperature interpretation
+    by first finding the optimal T via NLL grid search, then solving for b
+    analytically as the log-odds of the observed base rate minus the mean
+    scaled logit.
 
     T > 1 → softens probabilities (reduces overconfidence)
-    T < 1 → sharpens probabilities (increases confidence)
-
-    Optimal T minimises negative log-likelihood on the calibration set.
-    Grid-searched here for simplicity; gradient descent used in production.
+    T < 1 → sharpens probabilities
+    b     → corrects absolute bias from class reweighting
     """
 
     def __init__(self) -> None:
         self.T_: float = 1.0
+        self.b_: float = 0.0
 
     def fit(self, scores: np.ndarray, y: np.ndarray) -> "TemperatureCalibrator":
         eps = 1e-7
         scores_c = np.clip(scores, eps, 1 - eps)
         logits   = np.log(scores_c / (1 - scores_c))
 
-        best_T  = 1.0
+        best_T   = 1.0
         best_nll = np.inf
 
-        for T in np.linspace(0.1, 5.0, 200):
-            p    = 1 / (1 + np.exp(-logits / T))
-            p    = np.clip(p, eps, 1 - eps)
-            nll  = -np.mean(y * np.log(p) + (1 - y) * np.log(1 - p))
+        # Grid-search T; for each T compute optimal b analytically
+        # b* = logit(base_rate) - mean(logits / T)  → centres the distribution
+        base_rate  = np.clip(y.mean(), eps, 1 - eps)
+        target_log_odds = np.log(base_rate / (1 - base_rate))
+
+        for T in np.linspace(0.1, 5.0, 500):
+            scaled = logits / T
+            b      = target_log_odds - scaled.mean()   # bias correction
+            p      = np.clip(1 / (1 + np.exp(-(scaled + b))), eps, 1 - eps)
+            nll    = -np.mean(y * np.log(p) + (1 - y) * np.log(1 - p))
             if nll < best_nll:
                 best_nll = nll
                 best_T   = T
 
+        # Store optimal T and compute corresponding b
         self.T_ = best_T
-        log.info("  Temperature calibrator: T=%.4f  (NLL=%.6f)", best_T, best_nll)
+        scaled   = logits / best_T
+        self.b_  = target_log_odds - scaled.mean()
+        log.info("  Temperature calibrator: T=%.4f  b=%+.4f  (NLL=%.6f)",
+                 best_T, self.b_, best_nll)
         return self
 
     def predict(self, scores: np.ndarray) -> np.ndarray:
         eps    = 1e-7
         scores = np.clip(scores, eps, 1 - eps)
         logits = np.log(scores / (1 - scores))
-        return 1 / (1 + np.exp(-logits / self.T_))
+        return 1 / (1 + np.exp(-(logits / self.T_ + self.b_)))
 
 
 # =============================================================================
