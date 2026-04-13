@@ -87,6 +87,7 @@ from sklearn.preprocessing import LabelEncoder
 warnings.filterwarnings("ignore")
 
 try:
+    import lifelines
     from lifelines import CoxPHFitter, KaplanMeierFitter
     from lifelines.statistics import logrank_test, multivariate_logrank_test
     from lifelines.utils import concordance_index
@@ -282,7 +283,8 @@ def fit_cox(train_surv: pd.DataFrame,
     predicted hazard than a randomly chosen non-defaulter.  C-index = 0.5
     is random, 1.0 is perfect.
     """
-    avail_feats = [f for f in features if f in train_surv.columns]
+    avail_feats = [f for f in features if f in train_surv.columns
+                   and train_surv[f].notna().any()]
     df_cox      = train_surv[["duration", "event"] + avail_feats].dropna()
 
     log.info("  Cox PH dataset: %s loans  (%s events)",
@@ -445,7 +447,8 @@ def compute_horizon_pds(cox:       CoxPHFitter,
         Stage 2: Lifetime PD (significant increase in credit risk)
         Stage 3: Already defaulted
     """
-    avail = [f for f in features if f in oos_surv.columns]
+    avail = [f for f in features if f in oos_surv.columns
+             and oos_surv[f].notna().any()]
     df_cox = oos_surv[["loan_seq_num", "duration", "event"] + avail].dropna()
 
     if len(df_cox) == 0:
@@ -636,7 +639,8 @@ def main() -> None:
     log.info("  Cox coefficients → data/processed/survival_cox_coefs.csv")
 
     # C-index on OOS
-    avail = [f for f in COX_FEATURES if f in oos_surv.columns]
+    avail = [f for f in COX_FEATURES if f in oos_surv.columns
+             and oos_surv[f].notna().any()]
     df_cox_oos = oos_surv[["duration", "event"] + avail].dropna()
     if len(df_cox_oos) > 0:
         c_oos = concordance_index(

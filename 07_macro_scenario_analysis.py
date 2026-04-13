@@ -92,6 +92,30 @@ log = logging.getLogger(__name__)
 
 
 # =============================================================================
+# GPU DETECTION  (mirrors 03_pd_ensemble.py)
+# =============================================================================
+
+def _detect_gpu() -> str:
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            gpus = [g.strip() for g in result.stdout.strip().splitlines() if g.strip()]
+            log.info("[GPU] %d GPU(s) found: %s", len(gpus), ", ".join(gpus))
+            return "cuda"
+    except Exception:
+        pass
+    log.info("[CPU] No GPU detected — using device='cpu'.")
+    return "cpu"
+
+
+DEVICE = _detect_gpu()
+
+
+# =============================================================================
 # CONFIGURATION
 # =============================================================================
 
@@ -281,6 +305,12 @@ def prepare(train: pd.DataFrame,
     feats = [f for f in FEATURES if f in train.columns]
     train, oos = _encode_categoricals(train.copy(), oos.copy(), CAT_FEATURES)
 
+    # Drop columns that are entirely NaN in training — SimpleImputer cannot
+    # compute a median for them and silently drops them from the output matrix,
+    # causing shape mismatches downstream.  hpi_change and ur_3m_lag are the
+    # typical culprits when macro files are absent.
+    feats = [f for f in feats if train[f].notna().any()]
+
     imputer = SimpleImputer(strategy="median")
     X_tr = imputer.fit_transform(train[feats])
     X_oo = imputer.transform(oos[feats])
@@ -296,7 +326,7 @@ def retrain_xgboost(X_tr, y_tr, X_oo, y_oo) -> XGBClassifier:
         n_estimators=500, max_depth=6, learning_rate=0.05,
         subsample=0.5, colsample_bytree=0.8, min_child_weight=50,
         gamma=1.0, reg_alpha=0.1, reg_lambda=1.0, eval_metric="auc",
-        tree_method="hist", device="cpu", random_state=SEED, n_jobs=-1,
+        tree_method="hist", device=DEVICE, random_state=SEED,
         early_stopping_rounds=20, scale_pos_weight=spw,
     )
     xgb.fit(X_tr, y_tr, eval_set=[(X_oo, y_oo)], verbose=50)
