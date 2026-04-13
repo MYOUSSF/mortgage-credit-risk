@@ -301,21 +301,25 @@ def _encode_categoricals(train: pd.DataFrame, oos: pd.DataFrame,
 def prepare(train: pd.DataFrame,
             oos:   pd.DataFrame) -> tuple[np.ndarray, np.ndarray,
                                            np.ndarray, np.ndarray,
-                                           SimpleImputer, list[str]]:
+                                           SimpleImputer, list[str],
+                                           pd.DataFrame]:
     feats = [f for f in FEATURES if f in train.columns]
-    train, oos = _encode_categoricals(train.copy(), oos.copy(), CAT_FEATURES)
+    train_enc, oos_enc = _encode_categoricals(train.copy(), oos.copy(), CAT_FEATURES)
 
     # Drop columns that are entirely NaN in training — SimpleImputer cannot
     # compute a median for them and silently drops them from the output matrix,
     # causing shape mismatches downstream.  hpi_change and ur_3m_lag are the
     # typical culprits when macro files are absent.
-    feats = [f for f in feats if train[f].notna().any()]
+    feats = [f for f in feats if train_enc[f].notna().any()]
 
     imputer = SimpleImputer(strategy="median")
-    X_tr = imputer.fit_transform(train[feats])
-    X_oo = imputer.transform(oos[feats])
+    X_tr = imputer.fit_transform(train_enc[feats])
+    X_oo = imputer.transform(oos_enc[feats])
 
-    return X_tr, X_oo, train[TARGET].values, oos[TARGET].values, imputer, feats
+    # Return oos_enc so callers can pass the encoded DataFrame to functions
+    # that call imputer.transform() again (e.g. apply_scenario_shock).
+    # Using the raw oos would fail because categoricals are still strings.
+    return X_tr, X_oo, train_enc[TARGET].values, oos_enc[TARGET].values, imputer, feats, oos_enc
 
 
 def retrain_xgboost(X_tr, y_tr, X_oo, y_oo) -> XGBClassifier:
@@ -682,7 +686,7 @@ def main() -> None:
     # ── Prepare and retrain ───────────────────────────────────────────────
     log.info("")
     log.info("[2/5] Preparing data and retraining XGBoost …")
-    X_tr, X_oo, y_tr, y_oo, imputer, feats = prepare(train, oos)
+    X_tr, X_oo, y_tr, y_oo, imputer, feats, oos_enc = prepare(train, oos)
     xgb = retrain_xgboost(X_tr, y_tr, X_oo, y_oo)
 
     # ── Macro paths ───────────────────────────────────────────────────────
@@ -698,7 +702,9 @@ def main() -> None:
     pd_baseline = xgb.predict_proba(X_oo)[:, 1].mean()
     log.info("  Baseline portfolio mean PD: %.4f%%", pd_baseline * 100)
 
-    scenario_df = compute_scenario_pds(xgb, oos, macro_df, imputer, feats)
+    # Use oos_enc (label-encoded) not raw oos — apply_scenario_shock calls
+    # imputer.transform() which requires numeric-only columns.
+    scenario_df = compute_scenario_pds(xgb, oos_enc, macro_df, imputer, feats)
     scenario_df.to_csv(PROC_DIR / "scenario_pd_by_loan.csv", index=False)
     log.info("  Per-loan scenario PD → data/processed/scenario_pd_by_loan.csv")
 
@@ -708,7 +714,7 @@ def main() -> None:
     log.info("  ECL Summary:")
     log.info("\n%s", ecl_df.to_string(index=False))
 
-    sensitivity_df = sensitivity_analysis(xgb, oos, imputer, feats)
+    sensitivity_df = sensitivity_analysis(xgb, oos_enc, imputer, feats)
     sensitivity_df.to_csv(PROC_DIR / "scenario_sensitivity.csv", index=False)
 
     plot_pd_distributions(scenario_df)
