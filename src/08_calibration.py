@@ -94,7 +94,7 @@ from sklearn.isotonic import IsotonicRegression
 from sklearn.calibration import calibration_curve
 from sklearn.metrics import brier_score_loss, roc_auc_score
 
-import config
+import src.config as config
 
 warnings.filterwarnings("ignore")
 

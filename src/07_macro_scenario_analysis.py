@@ -123,7 +123,7 @@ except ImportError:
     print("ERROR: xgboost not installed.")
     sys.exit(1)
 
-import config
+import src.config as config
 
 # =============================================================================
 # LOGGING

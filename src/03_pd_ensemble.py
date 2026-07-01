@@ -97,7 +97,7 @@ warnings.filterwarnings("ignore")
 
 from xgboost import XGBClassifier
 
-import config
+import src.config as config
 
 # =============================================================================
 # LOGGING

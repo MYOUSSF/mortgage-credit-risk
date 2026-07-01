@@ -102,7 +102,7 @@ except ImportError:
     print("ERROR: lifelines not installed.  Run: pip install lifelines>=0.27.0")
     sys.exit(1)
 
-import config
+import src.config as config
 
 # =============================================================================
 # LOGGING

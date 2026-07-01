@@ -92,7 +92,7 @@ from sklearn.metrics import roc_auc_score, roc_curve
 from sklearn.preprocessing import StandardScaler
 from sklearn.impute import SimpleImputer
 
-import config
+import src.config as config
 
 warnings.filterwarnings("ignore")
 

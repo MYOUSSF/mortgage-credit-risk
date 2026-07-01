@@ -44,7 +44,7 @@ import requests
 from pathlib import Path
 from datetime import datetime
 
-import config
+import src.config as config
 
 # =============================================================================
 # CONFIGURATION  —  edit these before running

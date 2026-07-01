@@ -85,7 +85,7 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
 import statsmodels.api as sm
 
-import config
+import src.config as config
 
 warnings.filterwarnings("ignore")
 

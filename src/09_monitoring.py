@@ -76,7 +76,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from pathlib import Path
 
-import config
+import src.config as config
 
 warnings.filterwarnings("ignore")
 

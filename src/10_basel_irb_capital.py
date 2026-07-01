@@ -97,7 +97,7 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as mtick
 from scipy.stats import norm
 
-import config
+import src.config as config
 
 warnings.filterwarnings("ignore")
 
