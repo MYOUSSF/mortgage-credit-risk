@@ -1,0 +1,15 @@
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# Pipeline artifacts
+*.log
+data/raw/
+data/processed/
+data/figures/
+tests/.scratch/
+CLAUDE.md
