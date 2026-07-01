@@ -94,7 +94,14 @@ from sklearn.isotonic import IsotonicRegression
 from sklearn.calibration import calibration_curve
 from sklearn.metrics import brier_score_loss, roc_auc_score
 
-import src.config as config
+import os
+import sys
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
+import config
 
 warnings.filterwarnings("ignore")
 

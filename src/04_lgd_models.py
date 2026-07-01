@@ -85,7 +85,14 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
 import statsmodels.api as sm
 
-import src.config as config
+import os
+import sys
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
+import config
 
 warnings.filterwarnings("ignore")
 
