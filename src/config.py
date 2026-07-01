@@ -46,8 +46,8 @@ SEED = 42
 # PATHS
 # =============================================================================
 
-RAW_DIR   = Path("data/raw/freddie_mac")
-MACRO_DIR = Path("data/raw/macro")
+RAW_DIR   = Path("/kaggle/input/datasets/youssefmousaaid/freddie-mac-credit-risk/freddie_mac")
+MACRO_DIR = Path("/kaggle/input/datasets/youssefmousaaid/freddie-mac-credit-risk/macro")
 PROC_DIR  = Path("data/processed")
 CHUNK_DIR = PROC_DIR / "chunks"
 FIG_DIR   = Path("data/figures")
