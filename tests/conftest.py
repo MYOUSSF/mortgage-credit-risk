@@ -15,10 +15,10 @@ Two things make this non-trivial:
      directory. We import with cwd pointed at tests/.scratch/ so test runs
      don't drop log files or empty data/ dirs into the repo root.
 
-Every pipeline script does `import config` (the shared config.py at the
-repo root), so ROOT must be on sys.path before any of them are imported —
-`python -m pytest` from the repo root adds cwd automatically, but plain
-`pytest` does not, so we add it explicitly here for robustness.
+Every pipeline script does `import config` (the shared config.py in src/),
+so SRC must be on sys.path before any of them are imported — `python -m
+pytest` from the repo root adds cwd automatically, but plain `pytest` does
+not, so we add it explicitly here for robustness.
 """
 import importlib.util
 import os
@@ -28,10 +28,11 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
+SRC = ROOT / "src"
 SCRATCH = Path(__file__).resolve().parent / ".scratch"
 
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
 
 
 def _load_module(filename: str):
@@ -39,7 +40,7 @@ def _load_module(filename: str):
     if module_name in sys.modules:
         return sys.modules[module_name]
 
-    spec = importlib.util.spec_from_file_location(module_name, ROOT / filename)
+    spec = importlib.util.spec_from_file_location(module_name, SRC / filename)
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = module
 
@@ -91,3 +92,8 @@ def calibration():
 @pytest.fixture(scope="session")
 def basel_irb_capital():
     return _load_module("10_basel_irb_capital.py")
+
+
+@pytest.fixture(scope="session")
+def discrete_hazard():
+    return _load_module("11_discrete_hazard.py")

@@ -94,6 +94,53 @@ LGD_IPCW_G_FLOOR = 0.05
 
 
 # =============================================================================
+# LGD MODEL SUITE  (04_lgd_models.py)
+# =============================================================================
+# The LGD training sample is small — on the order of 150 resolved defaults —
+# so every constant here exists to keep a model identifiable at that size
+# rather than to squeeze out accuracy.
+
+# Categorical levels with fewer than this many TRAINING observations are
+# grouped into a single "other" level before one-hot encoding. Without this,
+# property_state alone would contribute ~50 indicator columns to a ~150-row
+# regression, most of them identifying a single loan — guaranteed separation
+# and meaningless coefficients. Unseen levels at scoring time land in the
+# same bucket.
+LGD_MIN_LEVEL_COUNT = 10
+LGD_OTHER_LEVEL = "other"
+# Code reserved for levels the tree path never saw in training. Kept distinct
+# from every fitted code so a tree can split on "unknown" rather than having
+# unseen levels silently masquerade as the first training level.
+LGD_UNSEEN_CODE = -1
+
+# Boundary tolerance defining the LGD point masses. The target is a ratio of
+# two reported dollar amounts, so an exact 0.0 or 1.0 is the normal encoding
+# of "full recovery" / "total loss"; 1e-4 of UPB is well below one dollar on
+# any realistic loan, so it separates the point masses from genuine interior
+# values without capturing any economically distinct case.
+LGD_BOUNDARY_EPS = 1e-4
+
+# Minimum training observations a class needs before it is modelled. Below
+# this, the two-stage model drops the class from stage 1 (assigning it
+# probability 0) or falls back to a constant interior mean, logging either.
+LGD_TWO_STAGE_MIN_CLASS_OBS = 10
+
+# FRM regularisation. The unpenalised quasi-binomial GLM is tried first
+# because its coefficients are the auditable output; L2 is a convergence
+# fallback, not the default estimator.
+LGD_FRM_USE_L2_FALLBACK = True
+LGD_FRM_L2_ALPHA = 1.0
+
+# Two-stage model regularisation. C is sklearn's inverse penalty strength for
+# the stage-1 multinomial logit; BETA_L2_ALPHA penalises the stage-2 beta
+# mean coefficients. Both penalise non-intercept coefficients only —
+# penalising the intercept would shift the predicted LGD *level*, and that
+# level is exactly what feeds the ECL anchor downstream.
+LGD_TWO_STAGE_STAGE1_C = 1.0
+LGD_TWO_STAGE_BETA_L2_ALPHA = 0.0
+
+
+# =============================================================================
 # IFRS 9 STAGING  (07_macro_scenario_analysis.py)
 # =============================================================================
 # Per-loan Stage 1/2/3 classification, IFRS 9 §5.5. A loan moves out of
@@ -139,6 +186,123 @@ LGD_CAT_FEATURES = [
     "property_type", "channel", "loan_purpose",
     "num_borrowers", "property_state",
 ]
+
+
+# =============================================================================
+# DISCRETE-TIME SURVIVAL (MONTHLY HAZARD)  (11_discrete_hazard.py)
+# =============================================================================
+# Ch.5b — fits the monthly default hazard directly on the loan-month panel,
+# replacing 06_survival_analysis.py's Cox model (which collapsed the panel to
+# one row per loan and read its time-varying covariates off the last row,
+# leaking end-of-follow-up state into the fit).
+#
+# Covariate set. Deliberately NOT config.PD_FEATURES: delinquency_indicator
+# and delinquency_status are excluded because a multi-period hazard projection
+# has to supply every covariate's future path, and the delinquency path is
+# itself an outcome of the default process — projecting it would require a
+# second model of delinquency transitions. See the script docstring.
+DISCRETE_HAZARD_STATIC_FEATURES = [
+    "credit_score", "orig_cltv", "orig_dti", "orig_interest_rate",
+    "orig_upb", "num_borrowers", "occupancy_status", "property_type",
+]
+# Macro covariates, read at the row's own report_date. These are the only
+# covariates whose future path the horizon-PD engine has to project, which is
+# why PIT/TTC differ only in what is supplied here.
+DISCRETE_HAZARD_MACRO_FEATURES = ["ur_3m_lag", "hpi_change"]
+
+DISCRETE_HAZARD_FEATURES = (
+    DISCRETE_HAZARD_STATIC_FEATURES + DISCRETE_HAZARD_MACRO_FEATURES
+)
+# num_borrowers stays numeric here, matching its treatment in PD_FEATURES
+# (it is absent from PD_CAT_FEATURES) rather than LGD_CAT_FEATURES.
+DISCRETE_HAZARD_CAT_FEATURES = ["occupancy_status", "property_type"]
+
+# Covariates that must never enter the hazard models — pinned as a constant so
+# the exclusion is testable rather than merely documented.
+DISCRETE_HAZARD_EXCLUDED_FEATURES = ["delinquency_indicator", "delinquency_status"]
+
+# Target construction: a row at age a predicts default in month a+1. A default
+# counts as "next period" if it falls within this many days of the row's
+# report_date — 45 days spans one monthly reporting period with slack for
+# month-length variation, without reaching the month after next.
+DISCRETE_HAZARD_NEXT_PERIOD_DAYS = 45
+
+# Baseline hazard alpha(t): spline basis on loan_age. 6 degrees of freedom is
+# enough to trace the standard mortgage seasoning ramp (rising to a peak
+# around years 3-5, then declining) without chasing month-to-month noise.
+DISCRETE_HAZARD_SPLINE_DF = 6
+
+# Case-control subsampling: keep every y=1 row, retain y=0 rows at this rate.
+# The monthly hazard is ~0.05-0.1%, so the panel is overwhelmingly y=0 and
+# nothing is lost by thinning it. The intercept is corrected afterwards by the
+# King & Zeng (2001) prior correction, log(r) on the logit scale.
+DISCRETE_HAZARD_SUBSAMPLE_RATE = 0.05
+
+# Rows per chunk when subsampling and when scoring multi-period horizon PDs —
+# bounds peak RAM on the 30 GB Kaggle instance.
+DISCRETE_HAZARD_CHUNK_SIZE = 2_000_000
+DISCRETE_HAZARD_SCORING_CHUNK_SIZE = 50_000
+
+# Cap on rows scored for the unsampled monthly-hazard metrics. Above this the
+# split is uniformly sampled — uniformly, so the base rate (and therefore the
+# calibration check) is preserved, unlike the case-control training sample.
+DISCRETE_HAZARD_MAX_EVAL_ROWS = 5_000_000
+
+DISCRETE_HAZARD_HORIZONS = [12, 24, 36, 60]
+# Hard cap on the "lifetime" horizon when remaining_months is available but
+# large (a fresh 30-year loan) — keeps the scoring loop bounded.
+DISCRETE_HAZARD_LIFETIME_CAP_MONTHS = 360
+
+# Snapshot dates at which the 12-month conditional PD is validated against
+# realised 12-month outcomes. Chosen to sit inside the OOT window with a full
+# 365-day forward window observable after each.
+DISCRETE_HAZARD_SNAPSHOT_DATES = ["2018-06-01", "2019-06-01", "2020-06-01"]
+
+# Covariates tested for proportional hazards (covariate x spline(loan_age)
+# interaction, likelihood-ratio test against the main model). Only meaningful
+# for the linear model — the tree model has no PH assumption to violate.
+DISCRETE_HAZARD_PH_TEST_FEATURES = ["credit_score", "orig_cltv", "ur_3m_lag"]
+
+# Monotone constraints for the XGBoost hazard model. Direction is economic,
+# not fitted: default risk falls as credit quality rises, and rises with
+# leverage, affordability strain and unemployment. Constraining these buys
+# auditability (a credit committee can be told the model cannot say "higher
+# FICO, higher risk") and more stable extrapolation at the edges of the
+# training range. Unlisted covariates are unconstrained.
+DISCRETE_HAZARD_USE_MONOTONE_CONSTRAINTS = True
+DISCRETE_HAZARD_MONOTONE_DIRECTIONS: dict[str, int] = {
+    "credit_score":  -1,
+    "orig_cltv":     +1,
+    "orig_dti":      +1,
+    "ur_3m_lag":     +1,
+}
+
+# XGBoost hazard-model hyperparameters. No scale_pos_weight: the class
+# imbalance is already handled by the case-control subsampling above, and
+# reweighting on top of it would distort the very probabilities the horizon-PD
+# product relies on (the prior correction assumes an undistorted sampled-
+# population probability).
+DISCRETE_HAZARD_XGB_PARAMS: dict = dict(
+    n_estimators          = 600,
+    max_depth             = 5,
+    learning_rate         = 0.05,
+    subsample             = 0.8,
+    colsample_bytree      = 0.8,
+    min_child_weight      = 50,
+    gamma                 = 1.0,
+    reg_alpha             = 0.1,
+    reg_lambda            = 1.0,
+    eval_metric           = "logloss",
+    tree_method           = "hist",
+    early_stopping_rounds = 30,
+)
+
+# Which discrete-hazard model 10_basel_irb_capital.py takes its TTC PD from.
+# Defaults to the linear model: Basel IRB capital is the most
+# supervisory-scrutinised output in the pipeline, and the logit model's
+# coefficients and odds ratios are directly auditable in a way the boosted
+# model's are not. "xgb" is permitted.
+DISCRETE_HAZARD_CAPITAL_MODEL = "logit"
 
 
 # =============================================================================

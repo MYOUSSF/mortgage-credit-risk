@@ -70,12 +70,21 @@ def test_capital_required_is_8pct_of_rwa_by_construction(basel_irb_capital):
 
 # ── load_ttc_pd: source preference and fallback ──────────────────────────────
 
+def _hazard_filename(basel_irb_capital) -> str:
+    """The discrete-hazard file name load_ttc_pd() looks for, per config."""
+    model = basel_irb_capital.config.DISCRETE_HAZARD_CAPITAL_MODEL
+    return f"discrete_hazard_{model}_pd_horizons.csv"
+
+
 def test_load_ttc_pd_prefers_calibration_output(basel_irb_capital, tmp_path, monkeypatch):
     monkeypatch.setattr(basel_irb_capital, "PROC_DIR", tmp_path)
     pd.DataFrame({
         "loan_seq_num": ["L1", "L2"], "split": ["oos-eval", "oot"],
         "pit_pd_platt": [0.02, 0.03], "ttc_pd": [0.015, 0.025],
     }).to_csv(tmp_path / "ttc_calibrated_pd.csv", index=False)
+    pd.DataFrame({
+        "loan_seq_num": ["L1"], "ttc_pd_12m": [0.888],
+    }).to_csv(tmp_path / _hazard_filename(basel_irb_capital), index=False)
     pd.DataFrame({
         "loan_seq_num": ["L1"], "ttc_pd_12m": [0.999],
     }).to_csv(tmp_path / "survival_pd_horizons.csv", index=False)
@@ -87,7 +96,30 @@ def test_load_ttc_pd_prefers_calibration_output(basel_irb_capital, tmp_path, mon
     assert out.set_index("loan_seq_num").loc["L1", "ttc_pd"] == pytest.approx(0.015)
 
 
+def test_load_ttc_pd_prefers_discrete_hazard_over_cox(basel_irb_capital, tmp_path, monkeypatch):
+    """
+    Ch.7's calibrated output is absent, so the discrete-time hazard model is
+    the next best source — ahead of the Cox file, whose covariates are read
+    off each loan's last observed row and whose horizon PD is measured from
+    origination rather than conditional on current age.
+    """
+    monkeypatch.setattr(basel_irb_capital, "PROC_DIR", tmp_path)
+    pd.DataFrame({
+        "loan_seq_num": ["L1", "L2"], "ttc_pd_12m": [0.012, 0.031],
+    }).to_csv(tmp_path / _hazard_filename(basel_irb_capital), index=False)
+    pd.DataFrame({
+        "loan_seq_num": ["L1"], "ttc_pd_12m": [0.999],
+    }).to_csv(tmp_path / "survival_pd_horizons.csv", index=False)
+
+    out, source = basel_irb_capital.load_ttc_pd()
+
+    assert _hazard_filename(basel_irb_capital) in source
+    assert "survival_pd_horizons.csv" not in source
+    assert out.set_index("loan_seq_num").loc["L1", "ttc_pd"] == pytest.approx(0.012)
+
+
 def test_load_ttc_pd_falls_back_to_survival_analysis(basel_irb_capital, tmp_path, monkeypatch):
+    """Cox remains the last resort when neither better source has been run."""
     monkeypatch.setattr(basel_irb_capital, "PROC_DIR", tmp_path)
     pd.DataFrame({
         "loan_seq_num": ["L1"], "ttc_pd_12m": [0.04],
@@ -99,7 +131,29 @@ def test_load_ttc_pd_falls_back_to_survival_analysis(basel_irb_capital, tmp_path
     assert out.set_index("loan_seq_num").loc["L1", "ttc_pd"] == pytest.approx(0.04)
 
 
-def test_load_ttc_pd_returns_empty_when_neither_source_exists(basel_irb_capital, tmp_path, monkeypatch):
+def test_load_ttc_pd_honours_the_configured_capital_model(basel_irb_capital,
+                                                          tmp_path, monkeypatch):
+    """
+    config.DISCRETE_HAZARD_CAPITAL_MODEL selects which discrete-hazard model
+    feeds capital; a file for the other model must not be picked up.
+    """
+    monkeypatch.setattr(basel_irb_capital, "PROC_DIR", tmp_path)
+    monkeypatch.setattr(basel_irb_capital.config,
+                        "DISCRETE_HAZARD_CAPITAL_MODEL", "xgb")
+    pd.DataFrame({
+        "loan_seq_num": ["L1"], "ttc_pd_12m": [0.077],
+    }).to_csv(tmp_path / "discrete_hazard_xgb_pd_horizons.csv", index=False)
+    pd.DataFrame({
+        "loan_seq_num": ["L1"], "ttc_pd_12m": [0.011],
+    }).to_csv(tmp_path / "discrete_hazard_logit_pd_horizons.csv", index=False)
+
+    out, source = basel_irb_capital.load_ttc_pd()
+
+    assert "discrete_hazard_xgb_pd_horizons.csv" in source
+    assert out.set_index("loan_seq_num").loc["L1", "ttc_pd"] == pytest.approx(0.077)
+
+
+def test_load_ttc_pd_returns_empty_when_no_source_exists(basel_irb_capital, tmp_path, monkeypatch):
     monkeypatch.setattr(basel_irb_capital, "PROC_DIR", tmp_path)
     out, source = basel_irb_capital.load_ttc_pd()
     assert out.empty

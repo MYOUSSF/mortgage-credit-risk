@@ -10,8 +10,10 @@ This is a portfolio/replication project, not a deployed model, so fields that ar
 |---|---|---|---|
 | [PD — Logistic Regression](pd_logistic_regression.md) | `02_pd_logistic_regression.py` | Ch.1 | Champion PD model — regulatory-facing, fully auditable |
 | [PD — XGBoost](pd_xgboost.md) | `03_pd_ensemble.py` | Ch.2 | Challenger PD model — higher discrimination, feeds SHAP (Ch.4) and macro ECL (Ch.6) |
-| [LGD Model Suite](lgd_models.md) | `04_lgd_models.py` | Ch.3 | Four LGD estimators compared champion/challenger |
-| [Survival — Cox PH](survival_cox.md) | `06_survival_analysis.py` | Ch.5 | Point-in-time and through-the-cycle PD |
+| [LGD Model Suite](lgd_models.md) | `04_lgd_models.py` | Ch.3 | Three LGD estimators: FRM (auditable mean), Two-Stage (full conditional distribution), Random Forest (challenger) |
+| [Survival — Cox PH](survival_cox.md) | `06_survival_analysis.py` | Ch.5 | ⚠️ **Superseded** — retained for reference; covariate leakage and non-conditional horizon PDs |
+| [Discrete Hazard — Logistic](discrete_hazard_logit.md) | `11_discrete_hazard.py` | Ch.5b | Champion survival model — conditional PIT/TTC PD at any horizon; default Basel capital PD source |
+| [Discrete Hazard — XGBoost](discrete_hazard_xgb.md) | `11_discrete_hazard.py` | Ch.5b | Challenger survival model — no proportional-hazards assumption |
 | [IFRS 9 Macro Scenario ECL & Staging](ifrs9_macro_scenario.md) | `07_macro_scenario_analysis.py` | Ch.6 | Stage 1/2/3 classification + staged ECL under macro scenarios |
 | [PD Calibration](calibration.md) | `08_calibration.py` | Ch.7 | Recalibration layer + TTC cycle adjustment applied to the PD-XGBoost score |
 | [Basel IRB Rating Scale & Capital](basel_irb_capital.md) | `10_basel_irb_capital.py` | Ch.9 | Rating master scale + retail mortgage RWA/capital |

@@ -56,8 +56,10 @@ import os
 import sys
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if REPO_ROOT not in sys.path:
-    sys.path.insert(0, REPO_ROOT)
+SRC_DIR = os.path.join(REPO_ROOT, "src")
+for path in [REPO_ROOT, SRC_DIR]:
+    if path not in sys.path:
+        sys.path.insert(0, path)
 
 import config
 
@@ -1086,8 +1088,16 @@ def main() -> None:
         # only carries the binary >0 flag) — the IFRS 9 stage-2/stage-3 DPD
         # backstops in 07_macro_scenario_analysis.py need the actual DPD count
         # to distinguish 30-DPD from 90-DPD, not just "any delinquency".
+        # default_date: the loan's earliest observed default report_date (NaT
+        # for loans never observed to default) — 11_discrete_hazard.py needs
+        # the actual event date, not just the 365-day default_12m flag, to
+        # place its monthly hazard target on the correct loan-month row. It
+        # must survive the split because split_pd() cuts on report_date, so a
+        # defaulting loan's rows can straddle pd_train and pd_oot: the last
+        # row in pd_train is then NOT the row before default, and the event
+        # date cannot be recovered from either file alone.
         base_cols = [c for c in ["loan_seq_num", "report_date", "default_12m",
-                                  "has_default", "current_upb",
+                                  "has_default", "default_date", "current_upb",
                                   "current_interest_rate", "remaining_months",
                                   "delinquency_status"]
                      if c in pd_chunk.columns]

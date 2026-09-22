@@ -2,7 +2,7 @@
 
 **Probability of Default · Loss Given Default · SHAP · Survival Analysis · Macro Stress Testing · Calibration**
 
-A replication and four-chapter extension of Sexton, S. M. (2022), *Credit Risk Modelling Using Machine Learning Methods*, PhD Thesis, Department of Economics — implemented on the Freddie Mac Single-Family Loan Performance dataset (2000–2020, 200M+ loan-month records).
+Credit Risk Modelling implemented on the Freddie Mac Single-Family Loan Performance dataset (2000–2020, 200M+ loan-month records).
 
 ---
 
@@ -12,11 +12,17 @@ A replication and four-chapter extension of Sexton, S. M. (2022), *Credit Risk M
 |---|---|---|---|
 | Logistic Regression (Ch.1) | ~0.87 | ~0.58 | ~0.74 |
 | XGBoost (Ch.2) | ~0.91 | ~0.64 | ~0.82 |
-| Cox Proportional Hazards (Ch.5) | ~0.85–0.89 | — | — |
+| Discrete-Time Hazard — Logistic (Ch.5b) | TBD — regenerate after running | TBD | TBD |
+| Discrete-Time Hazard — XGBoost (Ch.5b) | TBD — regenerate after running | TBD | TBD |
 
 Results evaluated on a held-out 30% OOS set and a temporal OOT set (2017–2024) never seen during training.
 
-> **Note:** these figures are illustrative and predate a fix to the OOS split (it was previously row-level rather than loan-level — see below). The same loan's monthly snapshots could land in both Train and OOS, letting models partially "recognise" training loans; the split is now grouped by `loan_seq_num` so no loan spans two splits. Treat the OOT column as the more trustworthy generalisation estimate until this table is regenerated on the corrected split.
+> **The Cox PH concordance previously reported here (~0.85–0.89) has been removed as invalid.** It was
+> computed on a dataset where each loan's time-varying covariates were read off its *last* observed row
+> — the month immediately before default, for a defaulter — so the model was scored on the borrower's
+> state at the brink of default. See [Ch.5](#ch5--survival-analysis-superseded) for the full disclosure.
+> Ch.5b replaces it; its metrics are marked TBD until `11_discrete_hazard.py` has been run on the full
+> panel, and are produced into `discrete_hazard_comparison.csv` rather than transcribed by hand.
 
 ---
 
@@ -43,6 +49,8 @@ mortgage-credit-risk/
 ├── 08_calibration.py                   # Ch.7: Platt / isotonic / temperature + TTC cycle adjustment
 ├── 09_monitoring.py                    # Ch.8: PSI drift monitoring vs training reference
 ├── 10_basel_irb_capital.py             # Ch.9: rating master scale + Basel IRB RWA/capital
+├── 11_discrete_hazard.py               # Ch.5b: discrete-time survival — monthly hazard,
+│                                        #   conditional PIT/TTC PD (supersedes 06)
 │
 │  ── Notebooks ──────────────────────────────────────────────────────────
 ├── notebooks/
@@ -115,8 +123,14 @@ python 06_survival_analysis.py        # Cox PH — right-censored time-to-defaul
 python 07_macro_scenario_analysis.py  # IFRS 9 stress testing + Stage 1/2/3 staging
 python 08_calibration.py              # Platt / isotonic calibration + TTC cycle adjustment
 python 09_monitoring.py               # PSI drift monitoring vs training reference
+python 11_discrete_hazard.py          # Ch.5b: discrete-time hazard — logit + XGBoost
 python 10_basel_irb_capital.py        # Rating master scale + Basel IRB RWA/capital
 ```
+
+> **Ordering note:** run `11_discrete_hazard.py` *before* `10_basel_irb_capital.py` — Ch.9 prefers the
+> discrete-hazard TTC PD over Ch.5's Cox output. `11_discrete_hazard.py` also requires `default_date`
+> in the PD parquet files, which means re-running `01_data_preprocessing.py` if your parquet files
+> predate that change; the script aborts with an explicit message rather than building an empty target.
 
 > **Environment:** Kaggle notebooks (2×T4 GPU, 30 GB RAM) recommended for scripts 03–05. All scripts fall back to CPU gracefully.
 
@@ -204,18 +218,38 @@ GPU acceleration delivers ~15× speedup. XGBoost outperforms LR by capturing non
 
 **Target:** `LGD = actual_loss / zero_balance_removal_upb`, clipped to [0, 1]
 
-Four models compared on RMSE, MAE, R², and mean bias:
+Three models compared on RMSE, MAE, R², and mean bias:
 
 | Model | Key Property |
 |---|---|
 | Fractional Response (FRM) | Papke-Wooldridge quasi-binomial GLM (logit link) — targets E[LGD\|X] directly, no boundary clipping |
-| Natural Spline Regression | Cubic splines (5 knots) — non-linearity without overfitting |
+| Two-Stage Model | 3-class multinomial logit over {LGD=0, interior, LGD=1} + beta regression on the interior — models the point masses explicitly |
 | Random Forest | 200 trees, max depth 6 |
-| XGBoost Regressor | Gradient boosted trees |
 
-All four are fit with inverse-probability-of-censoring (IPCW) sample weights correcting for LGD workout-period truncation bias: `extract_lgd_rows()` correctly keeps only *resolved* defaults (no leakage), but that resolved-case sample is truncated — a loan entering workout (90+ days past due) close to the dataset's end and taking a long time to resolve (contested foreclosure, REO) is systematically missing, while fast-resolving cases (short sales) are always captured even near the cutoff. `compute_ipcw_weights()` estimates the truncation ("censoring") distribution via a reversed Kaplan-Meier fit and reweights resolved cases accordingly, implemented in `01_data_preprocessing.py`.
+> **Previously four models** (the above plus a natural spline regression and an XGBoost regressor). The spline and XGBoost models were removed: all four estimated the same thing — the conditional *mean* of LGD — differing only in functional flexibility. On ~150 training observations that is the wrong axis to spend model risk on. The two-stage model replaces them because it answers a different question (below).
 
-The lowest-RMSE model on OOS (falling back to Train for small samples) is selected as champion and its mean predicted LGD is saved to `lgd_champion_summary.csv` — this is the value Ch.6's macro scenario ECL uses as its LGD anchor, rather than a flat assumption disconnected from this model suite.
+**Why a two-stage model.** Realised LGD is not smooth on [0, 1]. It is bimodal, with genuine point masses at exactly 0 (the disposition covers the balance) and exactly 1 (nothing recovered), and a diffuse spread of partial losses between them. A conditional-mean model can match the average of that distribution while placing almost no probability on either mass — reporting a confident 0.45 for a population in which hardly any loan actually loses 45%. The two-stage model represents the masses explicitly:
+
+```
+Stage 1:  P(class | x)  over {LGD=0, interior, LGD=1}     multinomial logit, L2
+Stage 2:  E[LGD | x, interior] = μ(x)                      beta regression, constant φ
+
+E[LGD | x] = P(LGD=1|x)·1 + P(interior|x)·μ(x) + P(LGD=0|x)·0
+```
+
+`predict()` returns that conditional mean, so RMSE/MAE/R²/bias and champion selection treat it exactly like the other two. Unlike them it also yields the *full conditional distribution* — `predict_components()` and `predict_quantile()` — which is what downturn/stressed-LGD work needs and a mean-only model cannot supply. `lgd_point_mass_calibration.csv` reports the observed share of LGD=0 and LGD=1 against each model's predicted share; for the FRM and the random forest that predicted share is ~0, which is the point of the comparison rather than an incidental diagnostic.
+
+**Beta regression is hand-written, deliberately.** `statsmodels.othermod.betareg.BetaModel` does not support observation weights — and it *accepts* a `weights=` keyword, emits only a `ValueWarning` (which this pipeline suppresses), and returns bit-identical unweighted estimates. Silently dropping the IPCW weights would reintroduce exactly the truncation bias they exist to correct, so `weighted_beta_nll()` implements the weighted Ferrari–Cribari-Neto mean/precision log-likelihood with analytic gradients, maximised by L-BFGS-B.
+
+**Categorical encoding fix.** Categoricals are now one-hot encoded with a dropped reference level, rare levels (`< config.LGD_MIN_LEVEL_COUNT`) and unseen levels grouped into `"other"`, with encoders fitted on the **training split only**. The previous implementation label-encoded categoricals into integer codes and fed those to the FRM as if continuous — asserting, for example, that `property_state` has one linear slope across alphabetically ordered states, AK→AL→AR being a unit step of equal effect each time. It also fitted the encoder on `concat([train, oos, oot])`, leaking the evaluation splits' level sets into the training encoding. **Any FRM coefficient or metric produced before this fix is invalid and should be regenerated rather than quoted.** The random forest keeps integer codes (a tree can isolate any subset by splitting, so the ordering imposes no functional-form assumption), but now fitted on train only, with a dedicated code for unseen levels.
+
+**Small-sample fallbacks**, all logged explicitly rather than applied silently: a boundary class with fewer than `config.LGD_TWO_STAGE_MIN_CLASS_OBS` training rows is dropped from stage 1 and assigned probability 0; too few interior rows, or a beta optimiser that fails, falls back to a constant IPCW-weighted interior mean with a method-of-moments φ; and the FRM tries its unpenalised (auditable) fit first, falling back to an L2-penalised fit only on non-convergence or perfect separation. `predict()` never raises because a class was absent in training.
+
+All three are fit with inverse-probability-of-censoring (IPCW) sample weights correcting for LGD workout-period truncation bias: `extract_lgd_rows()` correctly keeps only *resolved* defaults (no leakage), but that resolved-case sample is truncated — a loan entering workout (90+ days past due) close to the dataset's end and taking a long time to resolve (contested foreclosure, REO) is systematically missing, while fast-resolving cases (short sales) are always captured even near the cutoff. `compute_ipcw_weights()` estimates the truncation ("censoring") distribution via a reversed Kaplan-Meier fit and reweights resolved cases accordingly, implemented in `01_data_preprocessing.py`.
+
+The lowest-RMSE model on OOS (falling back to Train for small samples) is selected as champion and its mean predicted LGD is saved to `lgd_champion_summary.csv` — this is the value Ch.6's macro scenario ECL uses as its LGD anchor, rather than a flat assumption disconnected from this model suite. That file's schema is unchanged by the move to three models.
+
+**Metrics: `TBD — regenerate after running.`** The encoding fix changes every linear model's design matrix, so previously reported LGD figures do not carry over.
 
 ---
 
@@ -233,23 +267,112 @@ Example explanation:
 
 ---
 
-### Ch.5 — Survival Analysis
+### Ch.5 — Survival Analysis (superseded)
 
-Cox Proportional Hazards model handles right-censoring:
+> **⚠️ This chapter's Cox model is superseded by [Ch.5b](#ch5b--discrete-time-survival-monthly-hazard).**
+> `06_survival_analysis.py` is retained to document the approach and as a reference point. Its outputs
+> should not be used, and its reported C-index should not be quoted. Two confirmed defects:
+
+**1. Covariate leakage from end of follow-up.** `build_survival_df()` collapses the loan-month panel to
+one row per loan — the row with the maximum `loan_age` — and reads the time-varying covariates
+(`delinquency_indicator`, `hpi_change`, `ur_3m_lag`) off that last row. For a loan that defaults, the last
+retained row is the month immediately *before* default, so the model is handed the borrower's state at the
+brink of default and asked to predict default. `delinquency_indicator` is the worst offender: on that row
+it is close to a default flag. The resulting concordance (~0.85–0.89) is inflated by construction and is
+**not** a forecast performance estimate.
+
+**2. Horizon PDs are not conditional on the loan's current age.** `compute_horizon_pds()` returns
+`1 − S(h|x)` — the probability of default within `h` months measured *from origination* — and assigns it to
+a loan that has already survived to age `a`. The quantity actually wanted is:
+
+```
+PD(a → a+h) = 1 − S(a+h | x) / S(a | x)
+```
+
+The figure produced overstates PD for any seasoned loan, because it charges the loan again for the default
+risk of the years it has already survived.
+
+The original Cox specification, for reference:
 
 ```
 h(t | x) = h₀(t) · exp(x'β)
 ```
 
-| Problem with binary model | Cox PH solution |
-|---|---|
-| Active loans fabricated as non-defaulters | Censored loans contribute partial likelihood |
-| 12-month window only | PD at any horizon: 12m / 24m / 36m / lifetime |
-| No temporal structure | Full hazard trajectory modelled |
+Kaplan-Meier curves by FICO tertile and vintage era, hazard ratios with confidence intervals, and
+Schoenfeld residual PH checks are all still produced by the script, and the KM curves in particular remain
+a valid non-parametric description of the data.
 
-**Point-in-time (PIT) vs through-the-cycle (TTC) PD.** The headline horizon PD (`compute_horizon_pds()`) conditions on each loan's *actual current* macro state (`ur_3m_lag`, `hpi_change`), so it is point-in-time by construction — it moves with the cycle, which is exactly what IFRS 9 provisioning wants. Basel IRB capital wants the opposite: a PD that doesn't move with the current point in the cycle (EBA/GL/2017/16 §6.2). `compute_ttc_pds()` produces that as an actual second PD, not a diagnostic: it re-scores the same fitted Cox model with the macro covariates held at their long-run training-sample average, holding every other loan characteristic fixed. Both PIT and TTC PD are saved to `survival_pd_horizons.csv`.
+---
 
-Schoenfeld residuals validate the proportional hazards assumption.
+### Ch.5b — Discrete-Time Survival (Monthly Hazard)
+
+`11_discrete_hazard.py` replaces the Cox model with a **discrete-time survival** framework fitted directly
+on the loan-month panel, in **two implementations** sharing one target, one covariate set, one subsample
+and one scoring engine:
+
+| | Linear | Gradient-boosted |
+|---|---|---|
+| Model | `logit h(t|x) = α(t) + x'β` (statsmodels GLM) | `logit h(t|x) = f(t, x)` (XGBoost) |
+| Baseline hazard α(t) | B-spline on `loan_age`, 6 df | learned by the trees |
+| Proportional hazards | assumed, **LR-tested** | not assumed |
+| Role | champion — auditable, default Basel capital source | challenger — higher flexibility |
+| Card | [discrete_hazard_logit.md](docs/model_cards/discrete_hazard_logit.md) | [discrete_hazard_xgb.md](docs/model_cards/discrete_hazard_xgb.md) |
+
+**Every loan-month row is one observation — no data expansion.** A row at age `a` is a Bernoulli trial for
+"does this loan default in month `a+1`". Fitting a binary model to that target on the panel *is* maximum
+likelihood for the discrete-time survival model, because the panel likelihood factorises into one Bernoulli
+term per loan-month at risk (Allison 1982; Singer & Willett 1993). Each row carries its own contemporaneous
+covariates, so defect (1) above cannot arise.
+
+**Horizon PD is conditional by construction:**
+
+```
+PD(a → a+h) = 1 − ∏_{j=1..h} [1 − ĥ(a + j | x, macro_j)]
+```
+
+`loan_age` advances deterministically, so the product starts at the loan's *present* age — the loan is never
+charged again for months it has already survived. This fixes defect (2). Horizons: 12m / 24m / 36m / 60m,
+plus a lifetime PD capped at each loan's `remaining_months`.
+
+**Case-control subsampling + King & Zeng prior correction.** The panel is ~99.95% non-events. Every event
+row is kept; non-event rows are kept with probability `r`. Under this design the sampled odds are the true
+odds divided by `r`, so `logit(h_true) = logit(h_sampled) + log(r)` — an exact intercept shift under a logit
+link (which is why logit is preferred to cloglog; at a ~0.05% monthly hazard the two links are numerically
+indistinguishable anyway). The correction is applied *inside* `predict_hazard()`, identically for both
+models (for XGBoost, to the raw margin), so every downstream consumer sees corrected probabilities. Being
+monotone, it changes the PD **level** — and therefore ECL and capital — while leaving AUROC, KS and Gini
+untouched.
+
+**Internal covariates are deliberately excluded from both models.** `delinquency_indicator` and
+`delinquency_status` are not used. A multi-period horizon PD needs a projected value for every covariate at
+every future month; delinquency at month `a+j` is itself an *outcome* of the same deterioration process that
+produces default, so projecting it would require a second model of delinquency transitions, and holding it
+flat would assert that a current loan stays current for 60 months (driving its lifetime PD towards zero).
+Including it would also reproduce the Cox leakage in subtler form. The cost — the models cannot distinguish
+a current from a seriously delinquent loan with identical origination characteristics — is covered
+elsewhere for IFRS 9: Ch.6's 30-DPD and 90-DPD backstops drive stage allocation on exactly that information.
+
+**PIT vs TTC** come from the same fitted model, differing only in the macro path handed to the scoring
+engine: PIT holds each loan's current `ur_3m_lag` / `hpi_change` flat across the horizon (an explicit
+assumption, not a forecast); TTC pins them at their long-run training-sample mean, for Basel IRB capital
+(EBA/GL/2017/16 §6.2). `compute_conditional_horizon_pd()` accepts an explicit per-period macro path — a
+scalar, a length-`h` vector, or an `n_loans × h` array — which is the interface a future IFRS 9 scenario
+projection would use.
+
+**Validation — only what is honest.** No concordance on end-of-follow-up covariates:
+
+- Monthly hazard AUROC and log loss on **unsampled** OOS and OOT rows (log loss and the predicted÷observed
+  ratio are what confirm the prior correction worked; AUROC cannot, since the correction is monotone)
+- 12-month conditional PD vs the realised 12-month outcome at fixed snapshot dates, restricted to rows whose
+  12-month window is **fully observed** (the `filter_immature_right_censored()` maturity rule) — AUROC, KS,
+  Gini, Brier, decile calibration
+- The Ch.2 12-month XGBoost benchmark **on exactly those rows**. `03_pd_ensemble.py` persists no row keys in
+  `pd_xgb_results.csv`, so the Ch.2 specification is re-fitted to make an identical-population comparison
+  possible (as `07_macro_scenario_analysis.py` already does); the metrics CSV records which path was used
+- Observed Kaplan-Meier over `loan_age` (events ÷ at-risk, computed from the panel) vs mean predicted survival
+- Proportional-hazards LR tests (`covariate × spline(loan_age)` interaction) for the linear model only
+
+All three models land in one comparison table, `discrete_hazard_comparison.csv`, on identical rows.
 
 ---
 
@@ -335,7 +458,7 @@ RWA = K × 12.5 × EAD
 Capital = RWA × 8%  =  K × EAD
 ```
 
-PD input is TTC, not PIT — Basel IRB capital wants a PD that doesn't move with the current point in the cycle, the opposite of what IFRS 9 provisioning uses. The script prefers Ch.7's LRADR-anchored `ttc_calibrated_pd.csv`, falling back to Ch.5's macro-neutral `ttc_pd_12m` if Ch.7 hasn't been run.
+PD input is TTC, not PIT — Basel IRB capital wants a PD that doesn't move with the current point in the cycle, the opposite of what IFRS 9 provisioning uses. The script prefers Ch.7's LRADR-anchored `ttc_calibrated_pd.csv`, then Ch.5b's `discrete_hazard_{model}_pd_horizons.csv` (`config.DISCRETE_HAZARD_CAPITAL_MODEL` selects which hazard model, default `logit`), and only then Ch.5's Cox `ttc_pd_12m` as a last resort — the Cox file is ranked last because of the leakage and non-conditional-horizon defects documented in [Ch.5](#ch5--survival-analysis-superseded).
 
 **Known limitation:** LGD is Ch.3's population-level champion-model anchor, the same constraint documented for Ch.6's macro ECL engine, and it is not downturn-adjusted — Basel requires a downturn LGD for capital, distinct from the average LGD used for ECL.
 
@@ -349,7 +472,7 @@ PD input is TTC, not PIT — Basel IRB capital wants a PD that doesn't move with
 | IFRS 9 / CECL | Per-loan Stage 1/2/3 (SICR + DPD backstops), 12m/lifetime staged ECL, probability-weighted scenarios (Ch.6) |
 | BCBS 239 | SHAP waterfall/segment reports — Principles 6 & 11 |
 | OCC SR 11-7 | OOS/OOT backtesting, ongoing PSI monitoring (Ch.8), HL calibration test |
-| EBA GL/2017/16 | Survival-based PIT and TTC PD (Ch.5); Schoenfeld residual validation |
+| EBA GL/2017/16 | Survival-based PIT and TTC PD (Ch.5b discrete-time hazard; Ch.5 Cox superseded); proportional-hazards LR testing |
 
 ---
 
@@ -362,7 +485,9 @@ Each model has its own model card under [`docs/model_cards/`](docs/model_cards/R
 | PD — Logistic Regression (Ch.1) | [pd_logistic_regression.md](docs/model_cards/pd_logistic_regression.md) |
 | PD — XGBoost (Ch.2) | [pd_xgboost.md](docs/model_cards/pd_xgboost.md) |
 | LGD Model Suite (Ch.3) | [lgd_models.md](docs/model_cards/lgd_models.md) |
-| Survival — Cox PH (Ch.5) | [survival_cox.md](docs/model_cards/survival_cox.md) |
+| Survival — Cox PH (Ch.5) | [survival_cox.md](docs/model_cards/survival_cox.md) — ⚠️ superseded |
+| Discrete Hazard — Logistic (Ch.5b) | [discrete_hazard_logit.md](docs/model_cards/discrete_hazard_logit.md) |
+| Discrete Hazard — XGBoost (Ch.5b) | [discrete_hazard_xgb.md](docs/model_cards/discrete_hazard_xgb.md) |
 | IFRS 9 Macro Scenario ECL & Staging (Ch.6) | [ifrs9_macro_scenario.md](docs/model_cards/ifrs9_macro_scenario.md) |
 | PD Calibration (Ch.7) | [calibration.md](docs/model_cards/calibration.md) |
 | Basel IRB Rating Scale & Capital (Ch.9) | [basel_irb_capital.md](docs/model_cards/basel_irb_capital.md) |
@@ -371,16 +496,23 @@ Each model has its own model card under [`docs/model_cards/`](docs/model_cards/R
 
 ## Known Limitations
 
-1. **LGD sample size:** ~150 defaults in the sample dataset. Pre-2010 crisis vintages recommended.
+1. **LGD sample size:** ~150 defaults in the sample dataset. Pre-2010 crisis vintages recommended. This is the binding constraint on Ch.3: it is why the suite was reduced to three models with distinct purposes rather than four flexible mean estimators, why rare categorical levels are pooled into `"other"` before one-hot encoding (`property_state` alone would otherwise contribute ~50 indicators to a ~150-row regression, most identifying a single loan), and why every model carries an explicitly logged small-sample fallback. Check the run log for which fallbacks fired before quoting any LGD metric.
 2. **12-month window immaturity:** `filter_immature_right_censored()` drops loan-months too close to the dataset's true end to know their 12-month outcome (never-observed-to-default AND within 365 days of the panel's max `report_date`), so a right-censored active loan isn't mislabelled as a confirmed non-default. Rows with a known (even distant) `default_date` keep their label regardless of proximity to the cutoff.
 3. **No hyperparameter tuning:** Cross-validated grid search could improve OOT AUROC by 1–3 points.
 4. **Scenario LGD is population-level, not per-loan:** the macro ECL engine now anchors LGD to Ch.3's champion model output and scales it with scenario HPI (`scenario_lgd()`), rather than a flat 40% assumption — but every loan in a given scenario-quarter still gets the same LGD, since the OOS population scored for PD doesn't carry the LGD-specific features (`hpi_change_since_orig`, `mi_pct`, etc.) needed for true per-loan conditioning. A production system would persist those features alongside the PD population so LGD could vary by loan, not just by scenario and quarter.
-5. **Survival duration:** duration is `loan_age` at the last retained pre-default observation, plus one reporting period for actual defaulters (since `extract_pd_rows()` drops the default row itself to prevent leakage in the binary target) — the closest recoverable approximation to true time-to-default given that constraint.
-6. **EAD amortization is schedule-only:** `amortized_ead()` projects a standard declining-balance schedule from current UPB/rate/remaining term; it does not model stochastic prepayment beyond that schedule, so realised future balances (and therefore realised EAD) could decline faster than projected.
-7. **LGD IPCW onset trigger is a proxy:** the workout-period truncation correction (`compute_ipcw_weights()`) defines "onset" as first reaching 90+ days past due — a standard regulatory default trigger, but distinct from (and possibly earlier than) the actual start of a formal workout/foreclosure process, which isn't separately recorded in the fields this pipeline reads.
-8. **PD-at-origination proxy for SICR:** `07_macro_scenario_analysis.py`'s `compute_origination_pd()` approximates each loan's PD at initial recognition by re-scoring with `loan_age` forced to 0, holding every other feature (including current macro state) fixed — not the loan's actual historical origination-time PD, which this pipeline doesn't persist per loan. A production system would snapshot and store the underwriting-time score itself.
-9. **Rating master scale bounds are illustrative:** `config.RATING_SCALE`'s PD upper bounds are standard S&P/Moody's-style anchor points, not calibrated to this portfolio's realised default experience — an institution would fit its own master scale before using it for disclosure or limit-setting.
-10. **Basel capital LGD is not downturn-adjusted:** `10_basel_irb_capital.py` uses the same population-level, average-conditions LGD anchor as Ch.6's ECL engine (limitation #4). Basel IRB capital formally requires a downturn LGD — the LGD expected under adverse economic conditions — which is typically higher and would increase the computed capital requirement.
+5. **Prior LGD results are invalid under the encoding fix:** before the Ch.3 rewrite, categoricals were label-encoded into integer codes and passed to the Fractional Response Model as continuous covariates — so an FRM coefficient on `property_state` described a single linear slope across alphabetically ordered states. The encoder was also fitted on `concat([train, oos, oot])`, leaking the evaluation splits' level sets into the training encoding. Both are fixed (train-only one-hot with a dropped reference level and rare-level pooling), but any FRM coefficient or metric produced before the fix should be regenerated, not quoted.
+6. **The two-stage LGD model's tail behaviour rests on a constant-precision beta:** stage 2 fits `logit(μ) = Xγ` with a single precision parameter φ shared across all loans, so the *spread* of partial losses is assumed not to vary with loan characteristics even though the *mean* does. `predict_quantile()` inherits that assumption, which matters precisely where it would be used — a downturn LGD read off a high quantile. Modelling φ with its own covariates is the natural extension and is not done here, because at ~150 observations (of which fewer still are interior) there is not enough data to identify it.
+7. **Ch.5 Cox model is superseded and its metrics are invalid:** `06_survival_analysis.py` collapses the panel to one row per loan and reads time-varying covariates off that last row — the month before default, for a defaulter — so its reported C-index is inflated by construction, and its horizon PDs are measured from origination rather than conditional on the loan's current age. Both are fixed in Ch.5b (`11_discrete_hazard.py`); the Cox script is retained for reference only.
+8. **Discrete hazard: PIT macro projection is flat.** The PIT horizon PD holds each loan's current `ur_3m_lag` / `hpi_change` constant across the whole projection — an explicit "conditions stay as they are today" assumption, not a forecast, since this pipeline contains no macro forecasting model. At long horizons a loan observed in a recession is projected as if the recession never ends (and one at a cyclical peak as if the expansion never does), so 24m–60m PIT PDs are more dispersed across loans than a mean-reverting path would produce. The TTC path is the mean-reverting counterpart, and `compute_conditional_horizon_pd()` accepts an explicit scenario path for anyone who wants one.
+9. **Discrete hazard: internal (delinquency) covariates are excluded.** `delinquency_indicator` and `delinquency_status` are deliberately absent from both hazard models — their future path is an outcome of the default process itself and cannot be projected over a multi-period horizon without a second model of delinquency transitions, and on the row before default they are near-deterministic in the target. The cost is that the models cannot distinguish a current loan from a seriously delinquent one with otherwise identical characteristics; for IFRS 9 that information drives staging instead (Ch.6's 30/90-DPD backstops), not the PD level.
+10. **Discrete hazard: the PD level depends on the sampling correction.** Both models are fitted on a case-control subsample (all events, non-events at rate `r`) and corrected by the King & Zeng logit shift `+log(r)`. The correction is exact under a logit link and is validated against the realised base rate in the metrics (`pred_obs_ratio`), but it does mean the absolute PD level — and therefore every ECL and capital figure derived from it — rests on that correction being right, where discrimination metrics would be unaffected by an error in it. Check `pred_obs_ratio` in `discrete_hazard_*_metrics.csv` before trusting any level-sensitive output.
+11. **Discrete hazard (XGBoost): trees extrapolate flat.** Beyond the oldest `loan_age` or the most extreme macro values seen in training, the boosted model's predicted hazard stops responding — a 300-month projection sees the same hazard as a 60-month one once past the training range, and a macro shock more severe than anything observed is treated as if it were the worst observed. The linear model extrapolates linearly in the logit (with a constant-extrapolated spline baseline). Neither is right; they are wrong differently, which is why both are kept.
+12. **Survival duration (Ch.5, historical):** in the superseded Cox script, duration is `loan_age` at the last retained pre-default observation, plus one reporting period for actual defaulters (since `extract_pd_rows()` drops the default row itself to prevent leakage in the binary target) — the closest recoverable approximation to true time-to-default given that constraint.
+13. **EAD amortization is schedule-only:** `amortized_ead()` projects a standard declining-balance schedule from current UPB/rate/remaining term; it does not model stochastic prepayment beyond that schedule, so realised future balances (and therefore realised EAD) could decline faster than projected.
+14. **LGD IPCW onset trigger is a proxy:** the workout-period truncation correction (`compute_ipcw_weights()`) defines "onset" as first reaching 90+ days past due — a standard regulatory default trigger, but distinct from (and possibly earlier than) the actual start of a formal workout/foreclosure process, which isn't separately recorded in the fields this pipeline reads.
+15. **PD-at-origination proxy for SICR:** `07_macro_scenario_analysis.py`'s `compute_origination_pd()` approximates each loan's PD at initial recognition by re-scoring with `loan_age` forced to 0, holding every other feature (including current macro state) fixed — not the loan's actual historical origination-time PD, which this pipeline doesn't persist per loan. A production system would snapshot and store the underwriting-time score itself.
+16. **Rating master scale bounds are illustrative:** `config.RATING_SCALE`'s PD upper bounds are standard S&P/Moody's-style anchor points, not calibrated to this portfolio's realised default experience — an institution would fit its own master scale before using it for disclosure or limit-setting.
+17. **Basel capital LGD is not downturn-adjusted:** `10_basel_irb_capital.py` uses the same population-level, average-conditions LGD anchor as Ch.6's ECL engine (limitation #4). Basel IRB capital formally requires a downturn LGD — the LGD expected under adverse economic conditions — which is typically higher and would increase the computed capital requirement.
 
 ---
 
@@ -398,6 +530,9 @@ Each model has its own model card under [`docs/model_cards/`](docs/model_cards/R
 10. IASB (2014). *IFRS 9 Financial Instruments*.
 11. Hosmer, D. & Lemeshow, S. (2000). *Applied Logistic Regression*, 2nd ed.
 12. Platt, J. (1999). Probabilistic outputs for SVMs. *Advances in Large Margin Classifiers*.
+13. Allison, P. D. (1982). Discrete-time methods for the analysis of event histories. *Sociological Methodology*, 13, 61–98.
+14. Singer, J. D. & Willett, J. B. (1993). It's about time: using discrete-time survival analysis to study duration and the timing of events. *Journal of Educational Statistics*, 18(2), 155–195.
+15. King, G. & Zeng, L. (2001). Logistic regression in rare events data. *Political Analysis*, 9(2), 137–163.
 
 ---
 

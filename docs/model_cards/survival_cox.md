@@ -1,5 +1,35 @@
 # Model Card — Survival: Cox Proportional Hazards (Ch.5)
 
+> ## ⚠️ SUPERSEDED — do not use for new work
+>
+> This model is superseded by the discrete-time survival framework in `11_discrete_hazard.py`
+> ([logit card](discrete_hazard_logit.md) · [XGBoost card](discrete_hazard_xgb.md)).
+> It is retained to document the approach and as a reference point.
+>
+> **Two confirmed defects:**
+>
+> 1. **Covariate leakage.** `build_survival_df()` collapses the loan-month panel to one row
+>    per loan — the row with the maximum `loan_age` — and reads the time-varying covariates
+>    (`delinquency_indicator`, `hpi_change`, `ur_3m_lag`) off that last row. For a defaulter,
+>    that row is the month immediately before default, so the model is given the borrower's
+>    state at the brink of default and asked to predict default. `delinquency_indicator` is the
+>    worst offender: on the last pre-default row it is close to a default flag. **The C-index
+>    reported in §6 below is inflated by construction and is not a forecast performance
+>    estimate** — it is retained only so the defect is visible, and it should not be quoted.
+> 2. **Horizon PDs are not conditional on current age.** `compute_horizon_pds()` returns
+>    `1 − S(h|x)` — the probability of default within `h` months *measured from origination* —
+>    and assigns it to a loan that has already survived to age `a`. The correct conditional
+>    quantity is `1 − S(a+h|x) / S(a|x)`. The figure produced here overstates PD for any
+>    seasoned loan, because it charges the loan again for default risk it has already survived.
+>
+> Both are fixed in `11_discrete_hazard.py`, which fits the monthly hazard on the panel as it
+> stands (each row carrying its own contemporaneous covariates) and builds horizon PDs as a
+> product of one-period survival probabilities starting at the loan's current age.
+>
+> `10_basel_irb_capital.py` now prefers the discrete-hazard TTC PD over this model's output,
+> falling back here only if neither Ch.7 nor Ch.5b has been run.
+
+
 ## 1. Identification
 
 | | |
@@ -41,11 +71,19 @@ Same population and split as the PD models (`config.OOT_CUTOFF`, `config.OOS_FRA
 
 ## 6. Performance
 
-| Split | Concordance (≈ AUROC) |
-|---|---|
-| OOS | ~0.85–0.89 |
+| Split | Concordance (≈ AUROC) | Status |
+|---|---|---|
+| OOS | ~0.85–0.89 | **INVALID — do not quote** |
 
-Comparable discrimination to the logistic regression PD model, with the added benefit of unbiased multi-horizon PD rather than a single 12-month point estimate.
+**This figure must not be used.** It is inflated by the covariate leakage described in the banner
+at the top of this card: the model is scored on each loan's last pre-default row, where
+`delinquency_indicator` is close to a default flag. A leakage-free concordance for this model was
+never measured, and the model is superseded rather than re-measured.
+
+For honest, like-for-like performance on an identical population, see the discrete-time hazard
+cards ([logit](discrete_hazard_logit.md) · [XGBoost](discrete_hazard_xgb.md)) and
+`data/processed/discrete_hazard_comparison.csv`, which scores both hazard models and the Ch.2
+12-month benchmark on the same fully-observed snapshot rows.
 
 ## 7. Validation
 
@@ -72,3 +110,4 @@ Not currently covered by `09_monitoring.py` (PD-feature and PD-score focused). B
 |---|---|
 | v1.0 | Initial Cox PH extension — multi-horizon PD and IFRS 9 Stage 2 lifetime PD |
 | v1.1 | Added `compute_ttc_pds()` — macro-neutral re-scoring producing an actual through-the-cycle PD alongside the existing point-in-time horizon PD, for Basel IRB capital use |
+| v1.2 | **Superseded** by `11_discrete_hazard.py`. Disclosed the end-of-follow-up covariate leakage and the non-conditional horizon PDs; marked the reported C-index invalid. Model retained for reference only; `10_basel_irb_capital.py` now prefers the discrete-hazard TTC PD over this model's output. |

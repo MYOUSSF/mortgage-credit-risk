@@ -52,11 +52,18 @@ PD input: through-the-cycle, not point-in-time
     1. data/processed/ttc_calibrated_pd.csv   (08_calibration.py's LRADR-
        anchored TTC PD — logit-shifts the calibrated PIT PD so its
        population mean matches the long-run average default rate)
-    2. data/processed/survival_pd_horizons.csv's ttc_pd_12m column
+    2. data/processed/discrete_hazard_{model}_pd_horizons.csv's ttc_pd_12m
+       column, where {model} is config.DISCRETE_HAZARD_CAPITAL_MODEL
+       (11_discrete_hazard.py's macro-neutral discrete-time hazard model)
+    3. data/processed/survival_pd_horizons.csv's ttc_pd_12m column
        (06_survival_analysis.py's macro-neutral Cox re-scoring)
 
-  falling back to config.MACRO_LGD_ASSUMPTION-style flat assumptions with a
-  warning if neither upstream script has been run yet.
+  The discrete-time hazard model outranks the Cox model because the latter
+  reads its time-varying covariates off each loan's last observed row — the
+  month before default, for a defaulter — and reports horizon PD measured
+  from origination rather than conditional on the loan's current age.
+
+  Returning an empty frame with a warning if none has been run yet.
 
 Known limitation
 ------------------
@@ -72,7 +79,8 @@ Inputs
 ------
   data/processed/pd_oos.parquet                    (EAD: current_upb / orig_upb)
   data/processed/ttc_calibrated_pd.csv              (preferred TTC PD source)
-  data/processed/survival_pd_horizons.csv           (fallback TTC PD source)
+  data/processed/discrete_hazard_{model}_pd_horizons.csv  (second choice)
+  data/processed/survival_pd_horizons.csv           (last-resort TTC PD source)
   data/processed/lgd_champion_summary.csv           (optional — LGD anchor)
 
 Outputs
@@ -101,8 +109,10 @@ import os
 import sys
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if REPO_ROOT not in sys.path:
-    sys.path.insert(0, REPO_ROOT)
+SRC_DIR = os.path.join(REPO_ROOT, "src")
+for path in [REPO_ROOT, SRC_DIR]:
+    if path not in sys.path:
+        sys.path.insert(0, path)
 
 import config
 
@@ -193,9 +203,26 @@ def compute_rwa(k: np.ndarray, ead: np.ndarray) -> np.ndarray:
 
 def load_ttc_pd() -> tuple[pd.DataFrame, str]:
     """
-    Load a per-loan TTC PD, preferring 08_calibration.py's LRADR-anchored
-    output and falling back to 06_survival_analysis.py's macro-neutral Cox
-    re-scoring if 08 hasn't been run yet.
+    Load a per-loan TTC PD from the best available upstream source.
+
+    Preference order, best first:
+
+      1. 08_calibration.py's `ttc_calibrated_pd.csv` — an LRADR-anchored
+         calibrated PD, so its population mean is pinned to the long-run
+         average default rate (Basel II §461).
+      2. 11_discrete_hazard.py's `discrete_hazard_{model}_pd_horizons.csv`
+         — the macro-neutral 12-month conditional PD from the discrete-time
+         hazard model named by config.DISCRETE_HAZARD_CAPITAL_MODEL.
+      3. 06_survival_analysis.py's `survival_pd_horizons.csv` — the Cox
+         model's macro-neutral re-scoring.
+
+    The discrete-hazard file is preferred over the Cox file because the Cox
+    model has two defects the discrete-time model was written to fix: it
+    reads its time-varying covariates off each loan's LAST observed row
+    (which, for a defaulter, is the month before default — leakage), and its
+    horizon PD is measured from origination rather than conditioned on the
+    loan's current age, which overstates PD for a seasoned loan. Both are
+    documented in 11_discrete_hazard.py's docstring and in the README.
 
     Returns (DataFrame[loan_seq_num, ttc_pd], source_description).
     """
@@ -206,6 +233,17 @@ def load_ttc_pd() -> tuple[pd.DataFrame, str]:
             out = df[["loan_seq_num", "ttc_pd"]].drop_duplicates("loan_seq_num")
             return out, f"{calib_path.name} (LRADR-anchored calibrated PD)"
 
+    capital_model = getattr(config, "DISCRETE_HAZARD_CAPITAL_MODEL", "logit")
+    hazard_path = PROC_DIR / f"discrete_hazard_{capital_model}_pd_horizons.csv"
+    if hazard_path.exists():
+        df = pd.read_csv(hazard_path)
+        if not df.empty and "ttc_pd_12m" in df.columns:
+            out = df[["loan_seq_num", "ttc_pd_12m"]].rename(
+                columns={"ttc_pd_12m": "ttc_pd"}
+            ).drop_duplicates("loan_seq_num")
+            return out, (f"{hazard_path.name} (macro-neutral discrete-time "
+                         f"hazard, {capital_model} model)")
+
     survival_path = PROC_DIR / "survival_pd_horizons.csv"
     if survival_path.exists():
         df = pd.read_csv(survival_path)
@@ -213,12 +251,20 @@ def load_ttc_pd() -> tuple[pd.DataFrame, str]:
             out = df[["loan_seq_num", "ttc_pd_12m"]].rename(
                 columns={"ttc_pd_12m": "ttc_pd"}
             ).drop_duplicates("loan_seq_num")
+            log.warning(
+                "  Falling back to %s (Cox). That model reads its "
+                "time-varying covariates off each loan's last observed row "
+                "and reports horizon PD from origination rather than "
+                "conditional on current age — run 11_discrete_hazard.py for "
+                "a sounder TTC PD.", survival_path.name,
+            )
             return out, f"{survival_path.name} (macro-neutral Cox re-scoring)"
 
     log.warning(
-        "  Neither %s nor %s found — run 08_calibration.py or "
-        "06_survival_analysis.py first for a real TTC PD. Returning empty.",
-        calib_path, survival_path,
+        "  None of %s, %s or %s found — run 08_calibration.py, "
+        "11_discrete_hazard.py or 06_survival_analysis.py first for a real "
+        "TTC PD. Returning empty.",
+        calib_path, hazard_path, survival_path,
     )
     return pd.DataFrame(columns=["loan_seq_num", "ttc_pd"]), "none available"
 

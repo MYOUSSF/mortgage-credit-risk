@@ -6,6 +6,35 @@ Script  : 06_survival_analysis.py
 Purpose : Cox Proportional Hazards model for time-to-default, handling
           right-censoring more rigorously than the binary 12-month indicator.
 
+SUPERSEDED — kept for reference, not for use
+---------------------------------------------
+  This script is retained to document the Cox approach and as a reference
+  point, but it is superseded by 11_discrete_hazard.py. Two defects, both
+  confirmed, make its outputs unsuitable for production use:
+
+    1. Covariate leakage. build_survival_df() collapses the loan-month panel
+       to one row per loan (the maximum loan_age row) and reads the
+       time-varying covariates — delinquency_indicator, hpi_change,
+       ur_3m_lag — off that last row. For a defaulter, the last retained row
+       is the month immediately before default, so the model is handed the
+       borrower's state at the brink of default and asked to predict
+       default. The reported C-index (~0.85-0.89) is inflated by
+       construction and is not a forecast performance estimate.
+
+    2. Horizon PDs are not conditional on the loan's current age.
+       compute_horizon_pds() returns 1 - S(h|x), the probability of default
+       within h months measured FROM ORIGINATION, and assigns it to a loan
+       that has already survived to age a. The correct quantity is
+       1 - S(a+h|x)/S(a|x); the figure produced here overstates PD for any
+       seasoned loan, because it charges the loan again for the default risk
+       of the years it has already survived.
+
+  11_discrete_hazard.py fits the monthly hazard directly on the panel (so
+  every row carries its own contemporaneous covariates) and builds horizon
+  PDs as a product of one-period survival probabilities starting at the
+  loan's current age (so they are conditional by construction). See
+  docs/model_cards/survival_cox.md and the README's Ch.5 section.
+
 Why survival analysis outperforms binary classification for PD
 --------------------------------------------------------------
   The 12-month binary default indicator in Ch.1 and Ch.2 has three weaknesses:
@@ -106,8 +135,10 @@ import os
 import sys
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if REPO_ROOT not in sys.path:
-    sys.path.insert(0, REPO_ROOT)
+SRC_DIR = os.path.join(REPO_ROOT, "src")
+for path in [REPO_ROOT, SRC_DIR]:
+    if path not in sys.path:
+        sys.path.insert(0, path)
 
 import config
 

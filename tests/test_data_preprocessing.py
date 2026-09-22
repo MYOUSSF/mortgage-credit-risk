@@ -67,6 +67,66 @@ def test_extract_pd_rows_never_defaulting_loan_is_all_zero(preprocessing):
     assert (out["default_12m"] == 0).all()
 
 
+def test_extract_pd_rows_default_date_is_consistent_with_default_12m(preprocessing):
+    """
+    default_date is persisted to the PD parquet files (it is in main()'s
+    base_cols) because 11_discrete_hazard.py needs the actual event date to
+    place its monthly hazard target, and because split_pd() cuts on
+    report_date — so a defaulter's rows can straddle pd_train and pd_oot and
+    the event date is not recoverable from either file alone.
+
+    This pins the invariant the discrete hazard target depends on:
+        default_12m == 1  <=>  0 < (default_date - report_date).days <= 365
+    """
+    default_date = pd.Timestamp("2012-09-01")
+    # Rows spanning both sides of the 365-day boundary, plus the event row.
+    days_before = [800, 400, 366, 364, 200, 31, 0]
+    df = pd.DataFrame({
+        "loan_seq_num": ["L1"] * len(days_before),
+        "report_date":  [default_date - pd.Timedelta(days=d) for d in days_before],
+        "zero_balance_code": [np.nan] * (len(days_before) - 1) + ["09"],
+    })
+
+    out = preprocessing.extract_pd_rows(df)
+
+    assert "default_date" in out.columns
+    assert (out["default_date"] == default_date).all()
+
+    days_to_default = (out["default_date"] - out["report_date"]).dt.days
+    expected = ((days_to_default > 0) & (days_to_default <= 365)).astype(int)
+    assert out["default_12m"].tolist() == expected.tolist()
+    # Sanity: the boundary is exercised in both directions, so the assertion
+    # above is not vacuously comparing an all-zero (or all-one) column.
+    assert set(out["default_12m"]) == {0, 1}
+
+
+def test_default_date_is_na_for_a_loan_never_observed_to_default(preprocessing):
+    df = pd.DataFrame({
+        "loan_seq_num": ["L1"] * 3,
+        "report_date":  pd.date_range("2010-01-01", periods=3, freq="MS"),
+        "zero_balance_code": [np.nan, np.nan, "01"],  # 01 = prepayment
+    })
+    out = preprocessing.extract_pd_rows(df)
+    assert out["default_date"].isna().all()
+
+
+def test_filter_immature_right_censored_preserves_default_date(preprocessing):
+    """
+    filter_immature_right_censored() drops rows, never columns (beyond the
+    has_default flag it consumes) — default_date must reach the parquet files.
+    """
+    df = pd.DataFrame({
+        "loan_seq_num": ["L1", "L2"],
+        "report_date":  pd.to_datetime(["2015-01-01", "2020-01-01"]),
+        "default_date": pd.to_datetime(["2015-06-01", pd.NaT]),
+        "has_default":  [True, False],
+        "default_12m":  [1, 0],
+    })
+    out = preprocessing.filter_immature_right_censored(df)
+    assert "default_date" in out.columns
+    assert out.loc[out["loan_seq_num"] == "L1", "default_date"].iloc[0] == pd.Timestamp("2015-06-01")
+
+
 # ── split_pd: temporal OOT + random OOS ──────────────────────────────────────
 
 def test_split_pd_respects_temporal_boundary(preprocessing):
