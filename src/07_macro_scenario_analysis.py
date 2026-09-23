@@ -311,7 +311,34 @@ def scenario_lgd(base_lgd: float, hpi_ratio: float) -> float:
 # AMORTIZED EAD
 # =============================================================================
 
-def amortized_ead(oos_df: pd.DataFrame, n_quarters: int) -> np.ndarray:
+def load_expected_life() -> pd.DataFrame | None:
+    """
+    Per-loan IFRS 9 expected life from 12_competing_risks.py.
+
+    Optional input with a warning-and-fallback, matching load_base_lgd():
+    absent -> None, and amortized_ead() keeps using the contractual term,
+    which reproduces the pre-competing-risks behaviour exactly.
+    """
+    path = PROC_DIR / config.CR_EXPECTED_LIFE_FILE
+    if not path.exists():
+        log.warning(
+            "  %s not found — falling back to CONTRACTUAL maturity for the "
+            "lifetime ECL horizon. Run 12_competing_risks.py to measure "
+            "expected life, or set config.IFRS9_USE_EXPECTED_LIFE = False to "
+            "silence this.", path,
+        )
+        return None
+
+    df = pd.read_csv(path)
+    if df.empty or "expected_life_months" not in df.columns:
+        log.warning("  %s has no usable expected_life_months — using "
+                    "contractual maturity.", path)
+        return None
+    return df[["loan_seq_num", "expected_life_months"]].drop_duplicates("loan_seq_num")
+
+
+def amortized_ead(oos_df: pd.DataFrame, n_quarters: int,
+                  expected_life_months: np.ndarray | None = None) -> np.ndarray:
     """
     Project each loan's exposure at default forward across the macro path
     via standard declining-balance mortgage amortization, rather than
@@ -329,6 +356,34 @@ def amortized_ead(oos_df: pd.DataFrame, n_quarters: int) -> np.ndarray:
 
     where B0 = anchor balance, i = monthly rate, N0 = remaining term in
     months, m = months elapsed (quarter * 3).
+
+    Expected life (IFRS 9 §5.5.19)
+    -------------------------------
+    N0 above is the CONTRACTUAL remaining term. IFRS 9 measures lifetime ECL
+    over the EXPECTED life, and for a mortgage the two are far apart: a loan
+    with 340 contractual months left has an expected life of roughly 4-6
+    years once voluntary prepayment is accounted for. Amortizing over the
+    contractual term holds exposure high for years during which most of the
+    book has in fact refinanced away, overstating lifetime ECL.
+
+    When expected_life_months is supplied (by 12_competing_risks.py, gated on
+    config.IFRS9_USE_EXPECTED_LIFE), exposure is truncated to zero beyond
+    each loan's expected life:
+
+        EAD_i(m) = 0   for m > expected_life_i
+
+    Note what is NOT done: the amortization SCHEDULE still runs on the
+    contractual term. A loan does not pay itself down faster because it is
+    expected to prepay early — it follows its contractual schedule and then
+    disappears. Re-amortizing over the shorter horizon would understate every
+    balance before the cutoff as well as after it, which is a different and
+    larger error than the one being fixed.
+
+    A refinement left undone: truncating at the expected life is a hard
+    cutoff, where the fully correct treatment weights each quarter's exposure
+    by the probability the loan is still alive, S(q). The hard cutoff is what
+    the switchable flag implements; the survival-weighted version would need
+    the full per-loan survival curve rather than its integral.
 
     Returns an (n_loans, n_quarters) array, column q-1 = EAD at quarter q.
     """
@@ -369,6 +424,11 @@ def amortized_ead(oos_df: pd.DataFrame, n_quarters: int) -> np.ndarray:
         straight_line = b0 * (n0 - np.minimum(m, n0)) / n0
         balance = np.where(zero_rate, straight_line, declining)
         balance = np.where(matured, 0.0, balance)
+        if expected_life_months is not None:
+            # Beyond its expected life the loan is expected to have left the
+            # balance sheet, so it carries no exposure — regardless of how
+            # much contractual term remains.
+            balance = np.where(m > expected_life_months, 0.0, balance)
         ead[:, q - 1] = np.clip(balance, 0.0, None)
 
     return ead
@@ -424,6 +484,7 @@ def compute_ifrs9_ecl(xgb:       XGBClassifier,
                        feats:     list[str],
                        horizons:  list[int] = [4, 8, 12, N_QUARTERS],
                        base_lgd:  float = LGD,
+                       expected_life_months: np.ndarray | None = None,
                       ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Compute IFRS 9 ECL for each loan under each scenario.
@@ -458,7 +519,7 @@ def compute_ifrs9_ecl(xgb:       XGBClassifier,
     ecl_summary : DataFrame of portfolio-level ECL and weighted ECL
     """
     n_loans  = len(oos_df)
-    ead_mat  = amortized_ead(oos_df, N_QUARTERS)   # (n_loans, N_QUARTERS): EAD_i(q)
+    ead_mat  = amortized_ead(oos_df, N_QUARTERS, expected_life_months)
     orig_upb = oos_df["orig_upb"].values if "orig_upb" in oos_df.columns \
                else np.full(n_loans, 200_000.0)
 
@@ -1034,8 +1095,38 @@ def main() -> None:
     log.info("  At-risk pool: SP(q) = product_{k=1}^{q} (1 - PD(k))")
 
     horizons = [4, 8, 12, N_QUARTERS]
+    # IFRS 9 expected life (§5.5.19) vs contractual maturity. Gated on
+    # config.IFRS9_USE_EXPECTED_LIFE so the previous contractual-term
+    # behaviour stays exactly reproducible.
+    expected_life = None
+    if config.IFRS9_USE_EXPECTED_LIFE:
+        life_df = load_expected_life()
+        if life_df is not None:
+            merged_life = (
+                oos_enc[["loan_seq_num"]]
+                .merge(life_df, on="loan_seq_num", how="left")["expected_life_months"]
+            )
+            contractual = (pd.to_numeric(oos_enc["remaining_months"], errors="coerce")
+                           if "remaining_months" in oos_enc.columns
+                           else pd.Series(np.full(len(oos_enc), 360.0)))
+            # Loans absent from the competing-risks population keep their
+            # contractual term rather than silently getting a zero horizon.
+            expected_life = merged_life.fillna(contractual).to_numpy(dtype=float)
+            n_matched = int(merged_life.notna().sum())
+            log.info("  IFRS 9 expected life: matched %s of %s loans  "
+                     "(mean expected %.1f vs contractual %.1f months) — "
+                     "exposure is truncated beyond expected life.",
+                     f"{n_matched:,}", f"{len(oos_enc):,}",
+                     float(np.nanmean(expected_life)),
+                     float(contractual.mean()))
+    else:
+        log.info("  config.IFRS9_USE_EXPECTED_LIFE is False — lifetime ECL "
+                 "projected over CONTRACTUAL maturity (pre-competing-risks "
+                 "behaviour).")
+
     ecl_by_loan, ecl_summary, all_results, all_sp = compute_ifrs9_ecl(
-        xgb, oos_enc, macro_df, imputer, feats, horizons=horizons, base_lgd=base_lgd
+        xgb, oos_enc, macro_df, imputer, feats, horizons=horizons,
+        base_lgd=base_lgd, expected_life_months=expected_life,
     )
 
     ecl_by_loan.to_csv(PROC_DIR / "ifrs9_ecl_by_loan.csv", index=False)

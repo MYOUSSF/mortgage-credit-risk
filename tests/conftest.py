@@ -97,3 +97,8 @@ def basel_irb_capital():
 @pytest.fixture(scope="session")
 def discrete_hazard():
     return _load_module("11_discrete_hazard.py")
+
+
+@pytest.fixture(scope="session")
+def competing_risks():
+    return _load_module("12_competing_risks.py")

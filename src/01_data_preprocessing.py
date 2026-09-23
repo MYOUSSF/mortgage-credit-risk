@@ -124,13 +124,18 @@ SVCG_COLS = [
 ]
 
 # Servicer columns required by the pipeline (saves ~50% read time)
+# Servicer columns required by the pipeline (saves ~50% read time).
+# modification_flag is read for the competing-risks dataset: loan_age RESETS
+# when a loan is modified, so the flag both explains the reset and is a
+# legitimate covariate for the prepayment/default hazards. It is additive —
+# pd_*/lgd_* chunks select their columns by explicit list in main().
 SVCG_USECOLS = [
     "loan_seq_num", "monthly_reporting_period", "current_upb",
     "delinquency_status", "loan_age", "remaining_months", "zero_balance_code",
     "zero_balance_date", "current_interest_rate", "mi_recoveries",
     "net_sale_proceeds", "non_mi_recoveries", "expenses", "actual_loss",
     "zero_balance_removal_upb", "delinquent_accrued_interest",
-    "interest_bearing_upb",
+    "interest_bearing_upb", "modification_flag",
 ]
 
 # Origination columns propagated to each performance row after the merge
@@ -344,6 +349,60 @@ def load_unemployment() -> pd.DataFrame | None:
     return ur[["date", "unemployment_rate"]].dropna()
 
 
+def load_pmms() -> pd.DataFrame | None:
+    """
+    Freddie Mac Primary Mortgage Market Survey — weekly average 30-year
+    fixed commitment rate, used by the competing-risks dataset to build
+    refi_incentive = orig_interest_rate - pmms_rate_at_period.
+
+    The refinancing incentive is the single strongest driver of voluntary
+    prepayment: a borrower holding a 7% note when the market offers 4% has
+    an obvious reason to refinance, and one holding 3% when the market
+    offers 7% is locked in. Without it the prepayment hazard is close to
+    unidentifiable from loan characteristics alone.
+
+    Download : https://www.freddiemac.com/pmms
+    Save as  : data/raw/macro/pmms_30yr_fixed.csv
+    Columns  : date, rate   (any column containing "rate" is accepted)
+
+    Optional — returns None with a warning if absent, matching the
+    load_hpi() / load_unemployment() pattern. Callers skip the feature
+    rather than failing.
+    """
+    path = config.PMMS_PATH
+    if not path.exists():
+        log.warning(
+            "PMMS file not found at %s — refi_incentive will be skipped in "
+            "the surv_* dataset. Download the 30-year fixed weekly series "
+            "from https://www.freddiemac.com/pmms to enable it.", path,
+        )
+        return None
+
+    pmms = pd.read_csv(path, dtype=str)
+    pmms.columns = pmms.columns.str.lower().str.strip()
+
+    date_col = next((c for c in pmms.columns if "date" in c or c == "week"), None)
+    rate_col = next((c for c in pmms.columns
+                     if "rate" in c or "pmms" in c or c in {"value", "frm30"}), None)
+    if date_col is None or rate_col is None:
+        log.warning("PMMS file has unexpected columns %s — skipping refi_incentive.",
+                    list(pmms.columns))
+        return None
+
+    out = pd.DataFrame({
+        "date": pd.to_datetime(pmms[date_col], errors="coerce"),
+        "pmms_rate": pd.to_numeric(pmms[rate_col], errors="coerce"),
+    }).dropna().sort_values("date")
+
+    if out.empty:
+        log.warning("PMMS file parsed to zero usable rows — skipping refi_incentive.")
+        return None
+
+    log.info("  PMMS loaded: %d weekly observations (%s – %s).",
+             len(out), out["date"].min().date(), out["date"].max().date())
+    return out
+
+
 # =============================================================================
 # CLEANING
 # =============================================================================
@@ -407,7 +466,20 @@ def clean_perf(df: pd.DataFrame) -> pd.DataFrame:
         out["zero_balance_date"], col_name="zero_balance_date", warn_threshold=1.0
     )
 
-    # Delinquency: 'X' = current (0 months past due), numeric strings otherwise
+    # Delinquency: 'X' = current (0 months past due), numeric strings otherwise.
+    #
+    # The raw field is a STRING and carries non-numeric states that are not
+    # "missing": "RA" = REO acquisition (the loan is in the lender's REO
+    # inventory — a terminal credit state, not an unknown one) and "XX" =
+    # not available. The coercion below maps both to NaN, which is safe (it
+    # does not raise) but lossy for RA. The stripped raw string is preserved
+    # first so the competing-risks dataset can distinguish "REO acquired"
+    # from "unknown" without re-reading the servicer files.
+    #
+    # This column is additive: pd_*/lgd_* chunks select their columns by
+    # explicit list in main(), so carrying it here cannot alter their schema.
+    out["delinquency_status_raw"] = out["delinquency_status"].str.strip()
+
     out["delinquency_status"] = (
         out["delinquency_status"].str.strip()
         .replace({"X": "0", "R": np.nan})
@@ -625,6 +697,309 @@ def filter_immature_right_censored(df: pd.DataFrame,
         cutoff.date(), global_max_date.date(),
     )
     return df[~immature].drop(columns=["has_default"]).copy()
+
+
+# =============================================================================
+# COMPETING-RISKS SURVIVAL DATASET  (surv_* variant)
+# =============================================================================
+
+PREPAY_CODES   = config.PREPAY_CODES
+EVENT_TYPE     = config.EVENT_TYPE_COL
+DURATION       = config.DURATION_COL
+
+# Static origination covariates carried onto every loan-month row.
+SURV_STATIC_COLS = [
+    "credit_score", "orig_cltv", "orig_dti", "orig_upb", "orig_interest_rate",
+    "occupancy_status", "property_type", "loan_purpose", "channel",
+    "num_borrowers", "first_time_homebuyer", "property_state", "mi_pct",
+]
+# Time-varying covariates, valued at each row's own reporting period.
+SURV_TIME_VARYING_COLS = [
+    "current_upb", "current_interest_rate", "remaining_months",
+    "delinquency_status", "delinquency_status_raw", "is_reo_acquisition",
+    "modification_flag", "is_modified", "loan_age",
+    "ur_3m_lag", "hpi_change", "pmms_rate", "refi_incentive",
+]
+
+
+def months_since(start: pd.Series, end: pd.Series) -> pd.Series:
+    """
+    Whole calendar months between two date series.
+
+    Computed from the date fields rather than differencing days/30, so a
+    loan reporting on the 1st of every month advances by exactly 1 per
+    period with no drift.
+    """
+    return ((end.dt.year - start.dt.year) * 12
+            + (end.dt.month - start.dt.month))
+
+
+def clean_delinquency_status(raw: pd.Series) -> tuple[pd.Series, pd.Series]:
+    """
+    Parse the raw delinquency-status string into (months_past_due, is_reo).
+
+    The field is NOT numeric. Freddie Mac uses:
+        "0".."N"  months past due
+        "X"       current (0 months past due) in some vintages
+        "XX"      not available
+        "R"/"RA"  REO acquisition — a terminal credit state, NOT missing
+
+    A bare pd.to_numeric() maps X, XX, R and RA alike to NaN, which
+    conflates "this loan is in REO" with "we do not know". This returns the
+    REO state as its own flag so the competing-risks dataset can use it.
+    """
+    s = raw.astype(str).str.strip().str.upper()
+
+    is_reo = s.isin({"R", "RA"})
+    months = s.replace({"X": "0", "XX": np.nan, "R": np.nan, "RA": np.nan})
+    months = pd.to_numeric(months, errors="coerce")
+
+    return months, is_reo.astype(np.int8)
+
+
+def attach_refi_incentive(df: pd.DataFrame,
+                          pmms: pd.DataFrame | None) -> pd.DataFrame:
+    """
+    Join the PMMS market rate at each reporting period and derive
+
+        refi_incentive = orig_interest_rate - pmms_rate
+
+    Positive means the borrower's note rate is above the market — an
+    in-the-money refinance, the dominant driver of voluntary prepayment.
+
+    PMMS is weekly and reporting periods are monthly, so the join is a
+    backward merge_asof: each loan-month takes the most recent survey on or
+    before its reporting date. No PMMS file -> both columns are NaN and the
+    caller logs that the feature is unavailable.
+    """
+    out = df.copy()
+    if pmms is None or "report_date" not in out.columns:
+        out["pmms_rate"] = np.nan
+        out["refi_incentive"] = np.nan
+        return out
+
+    joined = pd.merge_asof(
+        out[["report_date"]].sort_values("report_date"),
+        pmms.rename(columns={"date": "report_date"}),
+        on="report_date", direction="backward",
+        tolerance=pd.Timedelta(days=31),
+    )
+    out["pmms_rate"] = joined["pmms_rate"].to_numpy()
+
+    if "orig_interest_rate" in out.columns:
+        out["refi_incentive"] = out["orig_interest_rate"] - out["pmms_rate"]
+    else:
+        out["refi_incentive"] = np.nan
+    return out
+
+
+def extract_survival_rows(df: pd.DataFrame,
+                          pmms: pd.DataFrame | None = None) -> pd.DataFrame:
+    """
+    Build the competing-risks loan-month panel for one origination cohort.
+
+    Differs from extract_pd_rows() in three ways that matter:
+
+    1. PREPAYMENT IS AN EVENT, NOT CENSORING. extract_pd_rows() keeps the
+       zero-balance-code-01 row, labels it default_12m = 0, and the loan
+       then simply stops appearing. Every downstream model therefore treats
+       a prepaid loan as "still at risk, outcome unknown". It is not: a
+       prepaid loan can never default afterwards. Here code 01 terminates
+       the loan with event_type = 2.
+
+    2. DURATION IS DERIVED FROM DATES, NOT loan_age. The Freddie Mac
+       loan_age field resets when a loan is modified (Modification Flag
+       Y/P), so a loan modified at month 40 can report loan_age = 1 the
+       following month. Using it as the survival clock rewinds time for
+       precisely the distressed loans whose timing matters most, and
+       produces a spurious mass of "young" defaults. duration_months is
+       months(orig_date -> event/censoring date) and is immune to this.
+       loan_age is still carried as an ordinary covariate.
+
+    3. ROWS RUN UP TO AND INCLUDING THE TERMINATING ROW. extract_pd_rows()
+       drops the default row itself to avoid leaking the binary label; a
+       discrete-time hazard model needs that row, because it is the one
+       carrying the event.
+
+    Returns one row per loan-month at risk, with:
+        event_type      loan-level terminal event (0 censored / 1 default /
+                        2 prepay) — constant within a loan
+        duration_months loan-level time to that event — constant within a loan
+        period_month    this row's month index since origination (1-based)
+        period_event    0 on every row except the terminating one, which
+                        carries event_type — the discrete-time target
+    """
+    out = df.copy()
+
+    required = {"loan_seq_num", "report_date", "orig_date"}
+    missing = required - set(out.columns)
+    if missing:
+        raise KeyError(f"extract_survival_rows requires {sorted(missing)}")
+
+    out = out.dropna(subset=["report_date", "orig_date"])
+    if out.empty:
+        return pd.DataFrame()
+
+    # ── Terminal events, by cause ────────────────────────────────────────
+    out["is_default_row"] = out["zero_balance_code"].isin(DEFAULT_CODES)
+    out["is_prepay_row"]  = out["zero_balance_code"].isin(PREPAY_CODES)
+
+    def _first_date(mask: pd.Series, name: str) -> pd.DataFrame:
+        """Earliest date per loan for one cause, as a 2-column frame.
+
+        Returned as a frame and merged rather than concatenated on the index:
+        when a cause has NO events in a cohort (common — many origination
+        years contain zero defaults), an empty Series carries an unnamed
+        index, and concatenating it strips the "loan_seq_num" index name off
+        the result, so the subsequent reset_index() yields a column called
+        "index" and every later reference raises KeyError.
+        """
+        sub = out.loc[mask, ["loan_seq_num", "report_date"]]
+        if sub.empty:
+            return pd.DataFrame({"loan_seq_num": pd.Series(dtype=out["loan_seq_num"].dtype),
+                                 name: pd.Series(dtype="datetime64[ns]")})
+        return (sub.groupby("loan_seq_num", as_index=False)["report_date"]
+                .min().rename(columns={"report_date": name}))
+
+    loans = (out.groupby("loan_seq_num", as_index=False)["report_date"]
+             .max().rename(columns={"report_date": "last_obs_date"}))
+    loans = loans.merge(_first_date(out["is_default_row"], "default_date"),
+                        on="loan_seq_num", how="left")
+    loans = loans.merge(_first_date(out["is_prepay_row"], "prepay_date"),
+                        on="loan_seq_num", how="left")
+    for col in ("default_date", "prepay_date"):
+        if col not in loans.columns:
+            loans[col] = pd.NaT
+        loans[col] = pd.to_datetime(loans[col])
+
+    # Whichever cause fires first terminates the loan. A loan carrying both
+    # codes is a data error, but taking the earlier of the two is the
+    # defensible resolution rather than letting it contribute twice.
+    both = loans["default_date"].notna() & loans["prepay_date"].notna()
+    if both.any():
+        log.warning("  %s loan(s) carry BOTH a default and a prepayment code — "
+                    "using whichever occurred first.", f"{int(both.sum()):,}")
+
+    d, p = loans["default_date"], loans["prepay_date"]
+    default_first = d.notna() & (p.isna() | (d <= p))
+    prepay_first  = p.notna() & (d.isna() | (p < d))
+
+    loans[EVENT_TYPE] = np.select(
+        [default_first, prepay_first],
+        [config.EVENT_DEFAULT, config.EVENT_PREPAY],
+        default=config.EVENT_CENSORED,
+    ).astype(np.int8)
+    loans["event_date"] = np.where(default_first, d,
+                                   np.where(prepay_first, p, loans["last_obs_date"]))
+    loans["event_date"] = pd.to_datetime(loans["event_date"])
+
+    # ── Duration, from dates ─────────────────────────────────────────────
+    orig_dates = out.groupby("loan_seq_num")["orig_date"].min().rename("orig_date_loan")
+    loans = loans.merge(orig_dates, on="loan_seq_num", how="left")
+    loans[DURATION] = months_since(loans["orig_date_loan"], loans["event_date"])
+    # A loan terminating in its first reporting period has duration 1, not 0:
+    # it was at risk for one period. Negative values would mean an event
+    # dated before origination, which is a data error.
+    bad = loans[DURATION] < 0
+    if bad.any():
+        log.warning("  %s loan(s) have an event dated before origination — dropped.",
+                    f"{int(bad.sum()):,}")
+        loans = loans[~bad]
+    loans[DURATION] = loans[DURATION].clip(lower=1).astype(int)
+
+    # ── Trim the panel to the at-risk window ─────────────────────────────
+    out = out.merge(
+        loans[["loan_seq_num", EVENT_TYPE, DURATION, "event_date", "orig_date_loan"]],
+        on="loan_seq_num", how="inner",
+    )
+    out = out[out["report_date"] <= out["event_date"]].copy()
+
+    # NOT clipped at 1: clipping would collapse a genuine month-0 row into
+    # month 1, giving two distinct reporting periods the same period index
+    # and double-counting one of them in the discrete-time panel. In Freddie
+    # Mac data orig_date is first_payment_date - 1 month, so the first
+    # servicing row already lands at month 1.
+    out["period_month"] = months_since(out["orig_date_loan"], out["report_date"])
+
+    # The terminating row carries the event; every earlier row is a survival.
+    is_terminal = out["report_date"] == out["event_date"]
+    out["period_event"] = np.where(is_terminal, out[EVENT_TYPE],
+                                   config.EVENT_CENSORED).astype(np.int8)
+
+    # ── Covariates ───────────────────────────────────────────────────────
+    if "delinquency_status_raw" in out.columns:
+        _months, is_reo = clean_delinquency_status(out["delinquency_status_raw"])
+        out["is_reo_acquisition"] = is_reo
+    else:
+        out["is_reo_acquisition"] = np.int8(0)
+
+    if "modification_flag" in out.columns:
+        flag = out["modification_flag"].astype(str).str.strip().str.upper()
+        out["is_modified"] = flag.isin({"Y", "P"}).astype(np.int8)
+    else:
+        out["modification_flag"] = np.nan
+        out["is_modified"] = np.int8(0)
+
+    out = attach_refi_incentive(out, pmms)
+
+    keep = (["loan_seq_num", "report_date", "orig_date_loan", "period_month",
+             "period_event", EVENT_TYPE, DURATION]
+            + [c for c in SURV_STATIC_COLS if c in out.columns]
+            + [c for c in SURV_TIME_VARYING_COLS if c in out.columns])
+    keep = list(dict.fromkeys(keep))
+    return out[keep].rename(columns={"orig_date_loan": "orig_date"})
+
+
+def split_survival(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """
+    Train / OOS / OOT split for the competing-risks panel.
+
+    Uses the same OOT_CUTOFF constant and the same GroupShuffleSplit on
+    loan_seq_num as split_pd(), with ONE deliberate difference, which is a
+    requirement of survival data rather than a preference:
+
+        split_pd() cuts OOT by ROW (report_date >= OOT_CUTOFF), so a single
+        loan's monthly rows can land in both the in-sample and OOT files.
+        That is harmless for a snapshot classifier. It is fatal for a
+        survival model: a loan's duration is a property of its whole
+        history, so splitting that history across two files would truncate
+        every straddling loan's duration at the cutoff in one file and
+        start it mid-flight in the other, biasing both.
+
+    So OOT is assigned by ORIGINATION date: loans originated on or after
+    OOT_CUTOFF form a genuine out-of-time cohort with their histories
+    intact, and the remaining loans are split train/OOS by loan, exactly as
+    split_pd() does. Whole loan histories never span two splits.
+    """
+    if df.empty:
+        return df.copy(), df.copy(), df.copy()
+
+    orig = df.groupby("loan_seq_num")["orig_date"].min()
+    oot_loans = set(orig[orig >= OOT_CUTOFF].index)
+
+    oot = df[df["loan_seq_num"].isin(oot_loans)].copy()
+    in_sample = df[~df["loan_seq_num"].isin(oot_loans)].copy()
+
+    if in_sample.empty:
+        log.warning("  split_survival: no in-sample loans before %s — "
+                    "returning everything as OOT.", OOT_CUTOFF.date())
+        return in_sample, in_sample.copy(), oot
+
+    gss = GroupShuffleSplit(n_splits=1, test_size=OOS_FRAC, random_state=SEED)
+    train_idx, oos_idx = next(gss.split(in_sample, groups=in_sample["loan_seq_num"]))
+    train = in_sample.iloc[train_idx]
+    oos   = in_sample.iloc[oos_idx]
+
+    def _loans(d):
+        return d["loan_seq_num"].nunique()
+
+    log.info(
+        "  Survival split — Train: %s rows / %s loans  |  OOS: %s / %s  |  "
+        "OOT: %s / %s  (OOT = originated on or after %s)",
+        f"{len(train):,}", f"{_loans(train):,}", f"{len(oos):,}", f"{_loans(oos):,}",
+        f"{len(oot):,}", f"{_loans(oot):,}", OOT_CUTOFF.date(),
+    )
+    return train, oos, oot
 
 
 # =============================================================================
@@ -1020,13 +1395,15 @@ def main() -> None:
     MACRO_DIR.mkdir(parents=True, exist_ok=True)
     hpi = load_hpi()
     ur  = load_unemployment()
+    pmms = load_pmms()   # optional — competing-risks refi_incentive only
 
     # ── Year-by-year processing ──────────────────────────────────────────
     log.info("")
     log.info("[2/4] Processing origination years …")
-    years_found   = 0
-    pd_row_total  = 0
-    lgd_row_total = 0
+    years_found    = 0
+    pd_row_total   = 0
+    lgd_row_total  = 0
+    surv_row_total = 0
 
     for year in range(START_YEAR, END_YEAR + 1):
         if not (RAW_DIR / f"sample_orig_{year}.txt").exists():
@@ -1132,7 +1509,22 @@ def main() -> None:
         if not onset_chunk.empty:
             onset_chunk.to_parquet(CHUNK_DIR / f"onset_{year}.parquet", index=False)
 
-        del merged, pd_chunk, lgd_chunk, onset_chunk
+        # Competing-risks panel — retains prepayment (zero-balance code 01)
+        # as an EVENT rather than letting the loan silently leave the panel.
+        # Written to its own chunk family so the pd_*/lgd_* outputs above are
+        # untouched.
+        surv_chunk = extract_survival_rows(merged, pmms)
+        if not surv_chunk.empty:
+            surv_chunk.to_parquet(CHUNK_DIR / f"surv_{year}.parquet", index=False)
+            surv_row_total += len(surv_chunk)
+            terminal = surv_chunk.drop_duplicates("loan_seq_num")[config.EVENT_TYPE_COL]
+            log.info("  Survival rows: %s  (loans: %s — default %s / prepay %s / censored %s)",
+                     f"{len(surv_chunk):,}", f"{len(terminal):,}",
+                     f"{int((terminal == config.EVENT_DEFAULT).sum()):,}",
+                     f"{int((terminal == config.EVENT_PREPAY).sum()):,}",
+                     f"{int((terminal == config.EVENT_CENSORED).sum()):,}")
+
+        del merged, pd_chunk, lgd_chunk, onset_chunk, surv_chunk
         gc.collect()
         years_found += 1
 
@@ -1146,6 +1538,7 @@ def main() -> None:
     log.info("")
     log.info("  Total PD rows : %s", f"{pd_row_total:,}")
     log.info("  Total LGD rows: %s", f"{lgd_row_total:,}")
+    log.info("  Total survival rows: %s", f"{surv_row_total:,}")
 
     # ── Combine chunks ───────────────────────────────────────────────────
     log.info("")
@@ -1154,6 +1547,7 @@ def main() -> None:
     pd_files    = sorted(CHUNK_DIR.glob("pd_*.parquet"))
     lgd_files   = sorted(CHUNK_DIR.glob("lgd_*.parquet"))
     onset_files = sorted(CHUNK_DIR.glob("onset_*.parquet"))
+    surv_files  = sorted(CHUNK_DIR.glob("surv_*.parquet"))
 
     if not pd_files:
         raise RuntimeError("No PD chunk files produced — inspect year-by-year output above.")
@@ -1215,6 +1609,41 @@ def main() -> None:
     # ── Save ────────────────────────────────────────────────────────────
     log.info("")
     log.info("[4/4] Saving outputs to %s …", OUT_DIR.resolve())
+
+    # ── Competing-risks variant ─────────────────────────────────────────
+    # Emitted alongside pd_* / lgd_*, never in place of them.
+    if surv_files:
+        surv_all = pd.concat([pd.read_parquet(f) for f in surv_files], ignore_index=True)
+        terminal = surv_all.drop_duplicates("loan_seq_num")
+        n_loans = len(terminal)
+        log.info("")
+        log.info("[+] Competing-risks panel: %s loan-months across %s loans",
+                 f"{len(surv_all):,}", f"{n_loans:,}")
+        for code, label in config.EVENT_TYPE_LABELS.items():
+            n = int((terminal[config.EVENT_TYPE_COL] == code).sum())
+            log.info("      %-9s %s loans (%.2f%%)", label, f"{n:,}",
+                     100.0 * n / max(n_loans, 1))
+        n_prepay = int((terminal[config.EVENT_TYPE_COL] == config.EVENT_PREPAY).sum())
+        n_default = int((terminal[config.EVENT_TYPE_COL] == config.EVENT_DEFAULT).sum())
+        if n_default:
+            log.info("      prepayment:default event ratio = %.1f:1 — this is the "
+                     "magnitude of the competing risk that 1 - S(t) ignores.",
+                     n_prepay / n_default)
+        if surv_all["refi_incentive"].notna().any():
+            log.info("      refi_incentive: mean=%.3f  (PMMS joined)",
+                     float(surv_all["refi_incentive"].mean()))
+        else:
+            log.warning("      refi_incentive unavailable (no PMMS file) — the "
+                        "prepayment hazard will be weakly identified.")
+
+        surv_train, surv_oos, surv_oot = split_survival(surv_all)
+        surv_train.to_parquet(OUT_DIR / config.SURV_TRAIN_FILE, index=False)
+        surv_oos.to_parquet(  OUT_DIR / config.SURV_OOS_FILE,   index=False)
+        surv_oot.to_parquet(  OUT_DIR / config.SURV_OOT_FILE,   index=False)
+        del surv_all, surv_train, surv_oos, surv_oot
+        gc.collect()
+    else:
+        log.warning("  No survival chunks produced — surv_*.parquet not written.")
 
     pd_train.to_parquet(OUT_DIR / "pd_train.parquet",   index=False)
     pd_oos.to_parquet(  OUT_DIR / "pd_oos.parquet",     index=False)

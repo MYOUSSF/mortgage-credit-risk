@@ -81,6 +81,87 @@ DEFAULT_CODES = {"02", "03", "06", "09", "15"}
 TARGET_PD  = "default_12m"
 TARGET_LGD = "lgd"
 
+
+# =============================================================================
+# COMPETING RISKS  (12_competing_risks.py, surv_* dataset variant)
+# =============================================================================
+# Voluntary prepayment. Chapters 1-5 treat this as censoring: the loan simply
+# stops appearing in the panel and the Cox model in 06_survival_analysis.py
+# converts its survival function with 1 - S(t). That is only valid if
+# prepayment cannot happen — censoring is assumed non-informative and, more
+# importantly, "surviving" is assumed to mean "still exposed to default".
+# For a mortgage neither holds: roughly 10x more loans leave via prepayment
+# than via default, and a prepaid loan can never default afterwards. So
+# 1 - S(t) answers "what fraction would default if prepayment were abolished",
+# which overstates the cumulative default probability. The competing-risks
+# treatment answers the question actually being asked, via the cumulative
+# incidence function.
+PREPAY_CODES = {"01"}
+
+# 3-class event indicator on the surv_* dataset variant.
+EVENT_TYPE_COL = "event_type"
+EVENT_CENSORED = 0
+EVENT_DEFAULT  = 1
+EVENT_PREPAY   = 2
+EVENT_TYPE_LABELS = {
+    EVENT_CENSORED: "censored",
+    EVENT_DEFAULT:  "default",
+    EVENT_PREPAY:   "prepay",
+}
+
+# Duration column on the surv_* variant: months from origination to the
+# terminating event (or to the performance cutoff if censored). Derived from
+# report_date - orig_date, NOT from loan_age: the Freddie Mac loan_age field
+# RESETS when a loan is modified (Modification Flag Y/P), so using it as the
+# duration variable silently rewinds the clock for exactly the distressed
+# loans whose timing matters most.
+DURATION_COL = "duration_months"
+
+# surv_* dataset variant — emitted ALONGSIDE pd_*.parquet, never replacing
+# them: chapters 1-4 and 7-10 read the pd_* files and must keep seeing the
+# identical schema and contents.
+SURV_TRAIN_FILE = "surv_train.parquet"
+SURV_OOS_FILE   = "surv_oos.parquet"
+SURV_OOT_FILE   = "surv_oot.parquet"
+
+# 12_competing_risks.py outputs. survival_pd_horizons.csv is deliberately NOT
+# among them — chapter 5 stays untouched as the naive baseline to compare
+# against.
+CR_COMPARISON_FILE      = "competing_risks_comparison.csv"
+CR_CIF_CURVES_FILE      = "competing_risks_cif_curves.csv"
+CR_COX_COEFS_FILE       = "competing_risks_cox_coefficients.csv"
+CR_MULTINOMIAL_COEFS_FILE = "competing_risks_multinomial_coefficients.csv"
+CR_EXPECTED_LIFE_FILE   = "competing_risks_expected_life.csv"
+
+# Horizons reported in the comparison table. "lifetime" is the longest
+# horizon the fitted curves support and is resolved at runtime.
+CR_HORIZONS_MONTHS = [12, 24, 36]
+
+# Discrete-time baseline hazard: months-since-origination is binned rather
+# than entered linearly, since a multinomial logit has no baseline hazard of
+# its own and the mortgage seasoning ramp is strongly non-linear.
+CR_DURATION_BIN_EDGES = [0, 6, 12, 18, 24, 36, 48, 60, 84, 120, 180, 240, 480]
+
+# A duration bin containing too few events of the rarer cause contributes a
+# dummy that is collinear with "no default ever happened here", which makes
+# the multinomial design singular and kills the clustered-SE fit. Adjacent
+# sparse bins are merged until each carries at least this many events of
+# every modelled cause. Merging coarsens the baseline hazard only where the
+# data cannot support it.
+CR_MIN_BIN_EVENTS = 5
+
+# Cap on the discrete-time panel handed to the multinomial fit. The full
+# loan-month panel is tens of millions of rows; the multinomial is fitted on
+# a loan-level random sample (whole loan histories, never individual rows, so
+# each loan's duration stays intact).
+CR_MAX_PANEL_LOANS = 200_000
+
+# Optional input: Freddie Mac Primary Mortgage Market Survey weekly average
+# 30-year fixed rate, used to build refi_incentive = orig_interest_rate -
+# pmms_rate. Absent -> the feature is skipped with a warning, matching the
+# HPI/unemployment optional-input pattern in 01_data_preprocessing.py.
+PMMS_PATH = MACRO_DIR / "pmms_30yr_fixed.csv"
+
 # LGD workout-period truncation bias (IPCW correction) — thesis §3.3 note.
 # Onset trigger: 90+ days past due (delinquency_status in months >= 3), the
 # standard regulatory proxy for "entered workout", distinct from the
@@ -417,6 +498,23 @@ PLT_STYLE: dict = {
 N_QUARTERS           = 20     # full path length: 5 years
 DISCOUNT_R           = 0.05   # annual risk-free discount rate for ECL
 MACRO_LGD_ASSUMPTION = 0.40   # placeholder — replace with 04_lgd_models.py output
+
+# Expected life vs contractual maturity for lifetime ECL.
+#
+# amortized_ead() runs each loan's balance down over remaining_months — the
+# CONTRACTUAL remaining term. IFRS 9 §5.5.19 measures lifetime ECL over the
+# expected life, and for a mortgage the two differ by a lot: a 30-year loan
+# with 340 contractual months left has an expected life of roughly 5-8 years
+# once voluntary prepayment is accounted for. Amortizing over the contractual
+# term holds exposure high for years during which most of the book has in
+# fact refinanced away, overstating lifetime ECL.
+#
+# When True, 07_macro_scenario_analysis.py caps each loan's amortization term
+# at its competing-risks expected life (12_competing_risks.py ->
+# CR_EXPECTED_LIFE_FILE), falling back to the contractual term with a warning
+# if that file has not been produced. False reproduces the original
+# contractual-maturity behaviour exactly.
+IFRS9_USE_EXPECTED_LIFE = True
 
 
 def _pad(lst: list, n: int, fill: float = 0.0) -> list:
