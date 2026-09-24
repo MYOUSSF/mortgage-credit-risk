@@ -26,7 +26,7 @@ does nothing to the filesystem or the logging system.
 """
 
 from __future__ import annotations
-
+import os
 import logging
 import subprocess
 import sys
@@ -46,11 +46,11 @@ SEED = 42
 # PATHS
 # =============================================================================
 
-RAW_DIR   = Path("/kaggle/input/datasets/youssefmousaaid/freddie-mac-credit-risk/freddie_mac")
-MACRO_DIR = Path("/kaggle/input/datasets/youssefmousaaid/freddie-mac-credit-risk/macro")
-PROC_DIR  = Path("data/processed")
-CHUNK_DIR = PROC_DIR / "chunks"
-FIG_DIR   = Path("data/figures")
+REPO_ROOT = Path(__file__).resolve().parent.parent   # src/config.py → repo root
+
+PROC_DIR = Path(os.environ.get("MCR_PROC_DIR", REPO_ROOT/"data"/"processed"))
+RAW_DIR  = Path(os.environ.get("MCR_RAW_DIR",  REPO_ROOT/"data"/"raw"))
+OUT_DIR  = Path(os.environ.get("MCR_OUT_DIR",  REPO_ROOT/"outputs"))
 
 
 # =============================================================================
