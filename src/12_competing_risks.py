@@ -347,6 +347,54 @@ def interpolate_at(times: np.ndarray, values: np.ndarray,
 # DATA PREPARATION
 # =============================================================================
 
+def load_survival_panel(path, extra_columns: list[str] | None = None) -> pd.DataFrame:
+    """
+    Load a surv_* panel with only the columns this script actually uses, and
+    in compact dtypes.
+
+    The panel is a loan-MONTH table: tens of millions of rows on the full
+    dataset, at roughly 600 bytes/row if read naively. Reading all 33 columns
+    as float64/object is an easy 15-20 GB and will take the kernel out on a
+    30 GB box. Two cheap defences:
+
+      * Selective column projection — parquet is columnar, so the unread
+        columns are never touched on disk or in RAM. This script needs about
+        a dozen of the 33.
+      * Category dtype for the low-cardinality strings, and for
+        loan_seq_num. Strings round-trip out of parquet as Python objects at
+        ~50-60 bytes per row each; as categories they become small integer
+        codes plus one shared dictionary. loan_seq_num matters most — it is
+        one distinct value per loan but repeats once per month.
+    """
+    import pyarrow.parquet as pq
+
+    wanted = (["loan_seq_num", "orig_date", "period_month", "period_event",
+               EVENT_TYPE, DURATION, "remaining_months"]
+              + list(COX_COVARIATES) + list(extra_columns or []))
+    # log_orig_upb is derived downstream, not stored.
+    wanted = [c for c in dict.fromkeys(wanted) if c != "log_orig_upb"]
+    wanted.append("orig_upb")
+
+    available = set(pq.read_schema(path).names)
+    columns = [c for c in dict.fromkeys(wanted) if c in available]
+    missing = [c for c in wanted if c not in available]
+    if missing:
+        log.warning("  %s: columns not present and skipped: %s", path.name, missing)
+
+    panel = pd.read_parquet(path, columns=columns)
+
+    for col in ("loan_seq_num",):
+        if col in panel.columns:
+            panel[col] = panel[col].astype("category")
+    for col in panel.select_dtypes("float64").columns:
+        panel[col] = panel[col].astype(np.float32)
+
+    log.info("  %s: %s rows x %d columns (%.1f MB in RAM)", path.name,
+             f"{len(panel):,}", panel.shape[1],
+             panel.memory_usage(deep=True).sum() / 1e6)
+    return panel
+
+
 def build_loan_level(panel: pd.DataFrame) -> pd.DataFrame:
     """
     Collapse the loan-month panel to one row per loan for the Cox models.
@@ -362,7 +410,9 @@ def build_loan_level(panel: pd.DataFrame) -> pd.DataFrame:
         return panel.copy()
 
     ordered = panel.sort_values(["loan_seq_num", "period_month"])
-    loans = ordered.groupby("loan_seq_num", as_index=False).first()
+    # observed=True: loan_seq_num is a category with one level per loan, and
+    # a non-observed groupby would try to build the full cartesian product.
+    loans = ordered.groupby("loan_seq_num", as_index=False, observed=True).first()
 
     if "orig_upb" in loans.columns:
         loans["log_orig_upb"] = np.log(loans["orig_upb"].clip(lower=1.0))
@@ -853,7 +903,7 @@ def main() -> None:
                   "emits the surv_* variant alongside pd_*.", train_path)
         return
 
-    train = pd.read_parquet(train_path)
+    train = load_survival_panel(train_path)
     log.info("  Train panel: %s loan-months, %s loans",
              f"{len(train):,}", f"{train['loan_seq_num'].nunique():,}")
 
@@ -1004,7 +1054,7 @@ def main() -> None:
         path = PROC_DIR / split_file
         if not path.exists():
             continue
-        split_loans = build_loan_level(pd.read_parquet(path))
+        split_loans = build_loan_level(load_survival_panel(path))
         scored = split_loans.dropna(subset=covariates)
         if scored.empty:
             continue

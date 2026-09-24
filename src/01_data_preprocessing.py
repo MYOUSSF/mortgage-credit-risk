@@ -533,16 +533,25 @@ def engineer_features(merged: pd.DataFrame,
 
     Features added
     --------------
-    hpi_change          : ratio of origination HPI to current HPI (PD)
+    hpi_change           : origination HPI / current HPI (PD)
     hpi_change_since_orig: same ratio stored separately for LGD
-    ur_3m_lag           : unemployment rate lagged 3 months
+    ur_3m_lag            : unemployment rate lagged 3 months
 
     HPI strategy
     ------------
-    Previously used a Python ``iterrows`` loop with a per-row dict cache —
-    O(n) Python overhead for every row.  Replaced with two vectorized merges
-    on a pre-built (zip3, year, quarter) lookup table: zero Python-level
-    iteration regardless of dataset size.
+    Two vectorized left merges on a pre-built (zip3, year, quarter) lookup
+    table. A pandas left merge preserves the left frame's row order, and the
+    lookup is de-duplicated on its keys, so the result stays row-aligned
+    with df (checked below).
+
+    Unemployment strategy
+    ---------------------
+    merge_asof requires both frames sorted on the join key, which reorders
+    the rows. The original row position is carried through the merge in
+    `_pos` and the result is re-sorted on it before assignment, so each
+    loan-month receives the rate for its own lag date. (The previous version
+    assigned the date-sorted result straight back by position, which
+    scrambled ur_3m_lag across rows.)
     """
     df = merged.copy()
 
@@ -554,9 +563,8 @@ def engineer_features(merged: pd.DataFrame,
 
         # Derive join keys for origination date and current report date
         orig_keys = _hpi_keys(df["orig_date"],   df["zip3"]).add_suffix("_orig")
-        curr_keys = _hpi_keys(df["report_date"],  df["zip3"]).add_suffix("_curr")
+        curr_keys = _hpi_keys(df["report_date"], df["zip3"]).add_suffix("_curr")
 
-        # Attach keys to a slim working frame (preserves df index)
         work = pd.concat([orig_keys, curr_keys], axis=1)
         work.index = df.index
 
@@ -580,11 +588,21 @@ def engineer_features(merged: pd.DataFrame,
             how="left",
         )
 
-        df["hpi_orig"] = work["hpi_orig"].values
-        df["hpi_curr"] = work["hpi_curr"].values
+        if len(work) != len(df):
+            raise RuntimeError(
+                f"HPI merge changed row count ({len(df):,} → {len(work):,}); "
+                "check the HPI file for duplicate (zip3, year, quarter) keys."
+            )
 
-        # Ratio > 1 means prices have risen since origination (positive equity)
-        # Ratio < 1 means prices have fallen (negative equity → higher default risk)
+        df["hpi_orig"] = work["hpi_orig"].to_numpy()
+        df["hpi_curr"] = work["hpi_curr"].to_numpy()
+
+        # hpi_change = HPI at origination / HPI now.
+        #   > 1  → prices have FALLEN since origination (equity eroded,
+        #          higher default risk)
+        #   < 1  → prices have RISEN since origination (equity built up)
+        # Any code that overrides this feature (e.g. the stress-test engine
+        # in 07_macro_scenario_analysis.py) must use the same direction.
         with np.errstate(divide="ignore", invalid="ignore"):
             ratio = np.where(
                 df["hpi_curr"] > 0,
@@ -599,16 +617,43 @@ def engineer_features(merged: pd.DataFrame,
 
     # ── Unemployment rate (3-month lag) ───────────────────────────────────
     if ur is not None and "report_date" in df.columns:
-        ur_indexed = ur.set_index("date")["unemployment_rate"]  # noqa: F841
-        lag_dates  = df["report_date"] - pd.DateOffset(months=3)
-        # Nearest available observation (tolerance = 45 days)
-        df["ur_3m_lag"] = pd.merge_asof(
-            pd.DataFrame({"lag_date": lag_dates}).sort_values("lag_date"),
-            ur.rename(columns={"date": "lag_date"}).sort_values("lag_date"),
+        lag_df = pd.DataFrame({
+            "lag_date": (df["report_date"] - pd.DateOffset(months=3)).to_numpy(),
+            "_pos":     np.arange(len(df)),
+        })
+
+        ur_sorted = (
+            ur[["date", "unemployment_rate"]]
+            .dropna(subset=["date"])
+            .drop_duplicates(subset=["date"])
+            .rename(columns={"date": "lag_date"})
+            .sort_values("lag_date")
+        )
+
+        # merge_asof cannot take null keys: merge only rows with a valid
+        # date; rows with a missing report_date keep NaN.
+        valid = lag_df["lag_date"].notna()
+        joined = pd.merge_asof(
+            lag_df[valid].sort_values("lag_date"),
+            ur_sorted,
             on="lag_date",
             direction="nearest",
             tolerance=pd.Timedelta(days=45),
-        )["unemployment_rate"].values
+        )
+
+        ur_values = np.full(len(df), np.nan)
+        ur_values[joined["_pos"].to_numpy()] = joined["unemployment_rate"].to_numpy()
+        df["ur_3m_lag"] = ur_values
+
+        n_missing = int(np.isnan(ur_values).sum())
+        if n_missing:
+            last_ur = ur_sorted["lag_date"].max()
+            log.warning(
+                "  ur_3m_lag missing for %s of %s rows (unemployment data ends "
+                "%s) — these rows will be dropped from the PD set. Extend "
+                "the BLS LNS14000000 file to cover the full panel.",
+                f"{n_missing:,}", f"{len(df):,}", f"{last_ur:%Y-%m}",
+            )
     else:
         df["ur_3m_lag"] = np.nan
 
@@ -720,6 +765,53 @@ SURV_TIME_VARYING_COLS = [
     "modification_flag", "is_modified", "loan_age",
     "ur_3m_lag", "hpi_change", "pmms_rate", "refi_incentive",
 ]
+
+
+# Explicit dtypes for the survival panel. Pandas defaults every numeric to
+# float64/int64, which on a 24M-row, 33-column panel is roughly twice the RAM
+# it needs. These are applied at chunk-build time so the saving stage never
+# materialises a float64 copy, and they are fixed rather than inferred so
+# every yearly chunk writes an identical schema (a year in which a column
+# happens to be all-NaN must not silently write a different type).
+SURV_FLOAT32_COLS = [
+    "credit_score", "orig_cltv", "orig_dti", "orig_upb", "orig_interest_rate",
+    "mi_pct", "current_upb", "current_interest_rate", "remaining_months",
+    "delinquency_status", "loan_age", "ur_3m_lag", "hpi_change",
+    "pmms_rate", "refi_incentive",
+]
+SURV_INT8_COLS  = ["period_event", "event_type", "is_reo_acquisition", "is_modified"]
+SURV_INT32_COLS = ["period_month", "duration_months"]
+# Low-cardinality strings: category dtype turns a per-row Python object
+# pointer into a small integer code plus one shared dictionary.
+SURV_CATEGORY_COLS = [
+    "occupancy_status", "property_type", "loan_purpose", "channel",
+    "num_borrowers", "first_time_homebuyer", "property_state",
+    "delinquency_status_raw", "modification_flag",
+]
+
+
+def normalise_surv_dtypes(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Cast the survival panel to compact, FIXED dtypes.
+
+    Roughly halves the panel's memory footprint. Fixed rather than inferred
+    so every origination-year chunk has an identical schema, which is what
+    lets the saving stage stream chunks straight into one parquet file
+    instead of concatenating the whole panel in RAM first.
+    """
+    for col in SURV_FLOAT32_COLS:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").astype(np.float32)
+    for col in SURV_INT8_COLS:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(np.int8)
+    for col in SURV_INT32_COLS:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(np.int32)
+    for col in SURV_CATEGORY_COLS:
+        if col in df.columns:
+            df[col] = df[col].astype("string").astype("category")
+    return df
 
 
 def months_since(start: pd.Series, end: pd.Series) -> pd.Series:
@@ -947,10 +1039,96 @@ def extract_survival_rows(df: pd.DataFrame,
             + [c for c in SURV_STATIC_COLS if c in out.columns]
             + [c for c in SURV_TIME_VARYING_COLS if c in out.columns])
     keep = list(dict.fromkeys(keep))
-    return out[keep].rename(columns={"orig_date_loan": "orig_date"})
+    out = out[keep].rename(columns={"orig_date_loan": "orig_date"})
+    return normalise_surv_dtypes(out)
 
 
-def split_survival(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def stream_survival_splits(surv_files: list, out_dir: Path) -> dict:
+    """
+    Split and write the survival panel one origination-year chunk at a time,
+    never holding the whole panel in memory.
+
+    Why this can be done per chunk: a Freddie Mac sample_svcg_YYYY.txt file
+    contains the COMPLETE servicing history of the loans originated in YYYY,
+    so every loan lives entirely inside exactly one chunk. Both split rules
+    are therefore chunk-local — the OOT assignment keys on each loan's own
+    origination date, and the train/OOS GroupShuffleSplit groups by
+    loan_seq_num within the chunk — and no loan can end up spanning two
+    splits, which is the property the survival models actually depend on.
+
+    The one behavioural difference from splitting the combined panel in a
+    single pass: which specific in-sample loans land in train vs OOS. Each
+    chunk draws its own ~30% holdout instead of one draw over all loans. The
+    design (loan-grouped, ~OOS_FRAC of loans held out, same OOT_CUTOFF) is
+    unchanged, and the aggregate proportions are the same.
+
+    Category columns are written as plain strings so every chunk produces an
+    identical Arrow schema; parquet still dictionary-encodes them on disk, so
+    the file size is unaffected.
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    targets = {"train": config.SURV_TRAIN_FILE,
+               "oos":   config.SURV_OOS_FILE,
+               "oot":   config.SURV_OOT_FILE}
+    writers: dict[str, pq.ParquetWriter] = {}
+    stats = {
+        "events": {config.EVENT_CENSORED: 0, config.EVENT_DEFAULT: 0,
+                   config.EVENT_PREPAY: 0},
+        "rows": {k: 0 for k in targets},
+        "loans": {k: 0 for k in targets},
+        "refi_sum": 0.0, "refi_n": 0, "total_rows": 0,
+    }
+
+    def _arrow_ready(frame: pd.DataFrame) -> pd.DataFrame:
+        cats = frame.select_dtypes(include="category").columns
+        if len(cats):
+            frame = frame.copy()
+            for col in cats:
+                frame[col] = frame[col].astype("string")
+        return frame
+
+    try:
+        for path in surv_files:
+            chunk = pd.read_parquet(path)
+            stats["total_rows"] += len(chunk)
+
+            # One row per loan for the event tally — each loan is confined to
+            # this chunk, so per-chunk counts sum to the panel total.
+            terminal = chunk[["loan_seq_num", EVENT_TYPE]].drop_duplicates("loan_seq_num")
+            for code in stats["events"]:
+                stats["events"][code] += int((terminal[EVENT_TYPE] == code).sum())
+            if "refi_incentive" in chunk.columns:
+                values = chunk["refi_incentive"]
+                stats["refi_sum"] += float(values.sum(skipna=True))
+                stats["refi_n"]  += int(values.notna().sum())
+
+            parts = split_survival(chunk, quiet=True)
+            for name, part in zip(("train", "oos", "oot"), parts):
+                if part.empty:
+                    continue
+                stats["rows"][name]  += len(part)
+                stats["loans"][name] += part["loan_seq_num"].nunique()
+
+                table = pa.Table.from_pandas(_arrow_ready(part), preserve_index=False)
+                if name not in writers:
+                    writers[name] = pq.ParquetWriter(out_dir / targets[name], table.schema)
+                else:
+                    table = table.cast(writers[name].schema)
+                writers[name].write_table(table)
+
+            del chunk, terminal, parts
+            gc.collect()
+    finally:
+        for writer in writers.values():
+            writer.close()
+
+    return stats
+
+
+def split_survival(df: pd.DataFrame,
+                   quiet: bool = False) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
     Train / OOS / OOT split for the competing-risks panel.
 
@@ -981,8 +1159,9 @@ def split_survival(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.Dat
     in_sample = df[~df["loan_seq_num"].isin(oot_loans)].copy()
 
     if in_sample.empty:
-        log.warning("  split_survival: no in-sample loans before %s — "
-                    "returning everything as OOT.", OOT_CUTOFF.date())
+        if not quiet:
+            log.warning("  split_survival: no in-sample loans before %s — "
+                        "returning everything as OOT.", OOT_CUTOFF.date())
         return in_sample, in_sample.copy(), oot
 
     gss = GroupShuffleSplit(n_splits=1, test_size=OOS_FRAC, random_state=SEED)
@@ -992,6 +1171,9 @@ def split_survival(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.Dat
 
     def _loans(d):
         return d["loan_seq_num"].nunique()
+
+    if quiet:
+        return train, oos, oot
 
     log.info(
         "  Survival split — Train: %s rows / %s loans  |  OOS: %s / %s  |  "
@@ -1025,8 +1207,10 @@ def extract_lgd_rows(df: pd.DataFrame) -> pd.DataFrame:
         .reset_index()
     )
 
-    upb = defaults["zero_balance_removal_upb"].fillna(defaults["current_upb"])
-    loss = pd.to_numeric(defaults["actual_loss"], errors="coerce").fillna(0)
+    upb  = defaults["zero_balance_removal_upb"].fillna(defaults["current_upb"])
+    # Freddie Mac reports realised losses as negative amounts; flip the sign.
+    # Missing losses stay NaN (dropped below) rather than being treated as zero.
+    loss = -pd.to_numeric(defaults["actual_loss"], errors="coerce")
 
     with np.errstate(divide="ignore", invalid="ignore"):
         lgd_raw = np.where(upb > 0, loss / upb, np.nan)
@@ -1568,6 +1752,11 @@ def main() -> None:
 
     pd_cols = [c for c in PD_FEATURES if c in pd_all.columns]
     pd_train, pd_oos, pd_oot = split_pd(pd_all)
+    # split_pd() returns independent frames, so the combined panel is dead
+    # weight from here on — and it is one of the largest objects alive when
+    # the saving stage runs.
+    del pd_all
+    gc.collect()
 
     def _attach_ipcw(d: pd.DataFrame, ipcw: pd.DataFrame) -> pd.DataFrame:
         if d.empty or "loan_seq_num" not in d.columns:
@@ -1610,41 +1799,6 @@ def main() -> None:
     log.info("")
     log.info("[4/4] Saving outputs to %s …", OUT_DIR.resolve())
 
-    # ── Competing-risks variant ─────────────────────────────────────────
-    # Emitted alongside pd_* / lgd_*, never in place of them.
-    if surv_files:
-        surv_all = pd.concat([pd.read_parquet(f) for f in surv_files], ignore_index=True)
-        terminal = surv_all.drop_duplicates("loan_seq_num")
-        n_loans = len(terminal)
-        log.info("")
-        log.info("[+] Competing-risks panel: %s loan-months across %s loans",
-                 f"{len(surv_all):,}", f"{n_loans:,}")
-        for code, label in config.EVENT_TYPE_LABELS.items():
-            n = int((terminal[config.EVENT_TYPE_COL] == code).sum())
-            log.info("      %-9s %s loans (%.2f%%)", label, f"{n:,}",
-                     100.0 * n / max(n_loans, 1))
-        n_prepay = int((terminal[config.EVENT_TYPE_COL] == config.EVENT_PREPAY).sum())
-        n_default = int((terminal[config.EVENT_TYPE_COL] == config.EVENT_DEFAULT).sum())
-        if n_default:
-            log.info("      prepayment:default event ratio = %.1f:1 — this is the "
-                     "magnitude of the competing risk that 1 - S(t) ignores.",
-                     n_prepay / n_default)
-        if surv_all["refi_incentive"].notna().any():
-            log.info("      refi_incentive: mean=%.3f  (PMMS joined)",
-                     float(surv_all["refi_incentive"].mean()))
-        else:
-            log.warning("      refi_incentive unavailable (no PMMS file) — the "
-                        "prepayment hazard will be weakly identified.")
-
-        surv_train, surv_oos, surv_oot = split_survival(surv_all)
-        surv_train.to_parquet(OUT_DIR / config.SURV_TRAIN_FILE, index=False)
-        surv_oos.to_parquet(  OUT_DIR / config.SURV_OOS_FILE,   index=False)
-        surv_oot.to_parquet(  OUT_DIR / config.SURV_OOT_FILE,   index=False)
-        del surv_all, surv_train, surv_oos, surv_oot
-        gc.collect()
-    else:
-        log.warning("  No survival chunks produced — surv_*.parquet not written.")
-
     pd_train.to_parquet(OUT_DIR / "pd_train.parquet",   index=False)
     pd_oos.to_parquet(  OUT_DIR / "pd_oos.parquet",     index=False)
     pd_oot.to_parquet(  OUT_DIR / "pd_oot.parquet",     index=False)
@@ -1655,6 +1809,51 @@ def main() -> None:
         lgd_train.to_parquet(OUT_DIR / "lgd_train.parquet", index=False)
         lgd_oos.to_parquet(  OUT_DIR / "lgd_oos.parquet",   index=False)
         lgd_oot.to_parquet(  OUT_DIR / "lgd_oot.parquet",   index=False)
+
+    # ── Competing-risks variant ─────────────────────────────────────────
+    # Emitted alongside pd_* / lgd_*, never in place of them.
+    #
+    # Runs LAST, and streams. Both matter on a 30 GB box: the PD and LGD
+    # frames above are released first so the survival panel never shares RAM
+    # with them, and the panel is split and written one origination-year
+    # chunk at a time rather than being concatenated whole. Concatenating it
+    # here — while pd_all, the three PD splits and the LGD frames were all
+    # still live — is what exhausted memory on Kaggle at the saving stage.
+    del pd_train, pd_oos, pd_oot
+    if not lgd_all.empty:
+        del lgd_train, lgd_oos, lgd_oot
+    del lgd_all, onset_all, iv_summary, psi_all, psi_oos, psi_oot
+    gc.collect()
+
+    if surv_files:
+        log.info("")
+        log.info("[+] Writing the competing-risks variant (streamed per "
+                 "origination-year chunk) …")
+        stats = stream_survival_splits(surv_files, OUT_DIR)
+
+        n_loans = sum(stats["events"].values())
+        log.info("  Competing-risks panel: %s loan-months across %s loans",
+                 f"{stats['total_rows']:,}", f"{n_loans:,}")
+        for code, label in config.EVENT_TYPE_LABELS.items():
+            n = stats["events"][code]
+            log.info("      %-9s %s loans (%.2f%%)", label, f"{n:,}",
+                     100.0 * n / max(n_loans, 1))
+        n_default = stats["events"][config.EVENT_DEFAULT]
+        if n_default:
+            log.info("      prepayment:default event ratio = %.1f:1 — this is the "
+                     "magnitude of the competing risk that 1 - S(t) ignores.",
+                     stats["events"][config.EVENT_PREPAY] / n_default)
+        if stats["refi_n"]:
+            log.info("      refi_incentive: mean=%.3f  (PMMS joined)",
+                     stats["refi_sum"] / stats["refi_n"])
+        else:
+            log.warning("      refi_incentive unavailable (no PMMS file) — the "
+                        "prepayment hazard will be weakly identified.")
+        for name in ("train", "oos", "oot"):
+            log.info("      surv_%-6s %s rows / %s loans", name,
+                     f"{stats['rows'][name]:,}", f"{stats['loans'][name]:,}")
+    else:
+        log.warning("  No survival chunks produced — surv_*.parquet not written.")
 
     # Clean up chunk files
     for f in CHUNK_DIR.glob("*.parquet"):

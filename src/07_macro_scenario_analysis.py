@@ -448,6 +448,22 @@ def score_quarter(xgb:       XGBClassifier,
     Score the OOS portfolio under one quarter's macro conditions,
     with loan_age incremented by `quarter` months (3 months per quarter).
 
+    HPI direction
+    -------------
+    The PD model's feature is hpi_change = HPI_orig / HPI_now
+    (> 1 means prices have fallen since origination). The scenario path's
+    hpi_ratio is HPI_scenario / HPI_today (< 1 means prices fall from
+    today, e.g. 0.74 at the Severe trough). Scenario prices are therefore
+    HPI_now * hpi_ratio, which gives each loan
+
+        hpi_change_q = HPI_orig / (HPI_now * hpi_ratio)
+                     = hpi_change_today / hpi_ratio
+
+    A price fall (hpi_ratio < 1) raises every loan's hpi_change, i.e. more
+    equity erosion and higher PD, and each loan keeps its own starting
+    equity position rather than being overwritten with one portfolio-wide
+    value.
+
     Parameters
     ----------
     quarter : number of quarters elapsed since t=0.
@@ -461,9 +477,14 @@ def score_quarter(xgb:       XGBClassifier,
 
     # Apply macro overrides
     if "ur_3m_lag" in df_q.columns:
+        # National rate: one value for every loan is correct here
         df_q["ur_3m_lag"] = macro_row["ur"]
     if "hpi_change" in df_q.columns:
-        df_q["hpi_change"] = macro_row["hpi_ratio"]
+        # Scale each loan's own orig/current ratio by the scenario price path.
+        # (Previously: df_q["hpi_change"] = macro_row["hpi_ratio"], which fed
+        # the model the inverse direction, so the Severe HPI fall read as a
+        # ~35% rise, and it erased every loan's individual equity position.)
+        df_q["hpi_change"] = oos_df["hpi_change"] / macro_row["hpi_ratio"]
 
     # Age the loan: each quarter = 3 additional months
     if "loan_age" in df_q.columns:
