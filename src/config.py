@@ -46,11 +46,12 @@ SEED = 42
 # PATHS
 # =============================================================================
 
-REPO_ROOT = Path(__file__).resolve().parent.parent   # src/config.py → repo root
+REPO_ROOT = Path(__file__).resolve().parent.parent    # src/config.py → repo root
+DATA_DIR  = Path(os.environ.get("MCR_DATA_DIR", REPO_ROOT/"data"))
 
-PROC_DIR = Path(os.environ.get("MCR_PROC_DIR", REPO_ROOT/"data"/"processed"))
-RAW_DIR  = Path(os.environ.get("MCR_RAW_DIR",  REPO_ROOT/"data"/"raw"))
-OUT_DIR  = Path(os.environ.get("MCR_OUT_DIR",  REPO_ROOT/"outputs"))
+RAW_DIR   = Path(os.environ.get("MCR_RAW_DIR",  DATA_DIR/"raw"/"freddie_mac"))
+PROC_DIR  = Path(os.environ.get("MCR_PROC_DIR", DATA_DIR/"processed"))
+MACRO_DIR = Path(os.environ.get("MCR_MACRO_DIR", DATA_DIR/"macro"))
 
 
 # =============================================================================
