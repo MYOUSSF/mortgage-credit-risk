@@ -154,8 +154,10 @@ log = logging.getLogger(__name__)
 # =============================================================================
 
 PROC_DIR = config.PROC_DIR
+OUT_DIR  = config.OUT_DIR
 FIG_DIR  = config.FIG_DIR
 FIG_DIR.mkdir(parents=True, exist_ok=True)
+OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 SEED   = config.SEED
 TARGET = config.TARGET_PD
@@ -778,7 +780,7 @@ def main() -> None:
     # Save coefficients
     summary = cox.summary.copy()
     summary.index.name = "feature"
-    summary.reset_index().to_csv(PROC_DIR / "survival_cox_coefs.csv", index=False)
+    summary.reset_index().to_csv(OUT_DIR / "survival_cox_coefs.csv", index=False)
     log.info("  Cox coefficients → data/processed/survival_cox_coefs.csv")
 
     # C-index on OOS
@@ -814,7 +816,7 @@ def main() -> None:
                 on="loan_seq_num", how="left",
             )
 
-        horizon_df.to_csv(PROC_DIR / "survival_pd_horizons.csv", index=False)
+        horizon_df.to_csv(OUT_DIR / "survival_pd_horizons.csv", index=False)
         log.info("  Horizon PD saved → data/processed/survival_pd_horizons.csv")
 
         pd_cols = [c for c in horizon_df.columns if c.startswith("pd_") or c.startswith("ttc_pd_")]

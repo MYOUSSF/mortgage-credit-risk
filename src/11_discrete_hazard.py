@@ -227,8 +227,10 @@ DEVICE, N_GPUS = config.detect_gpu()
 # =============================================================================
 
 PROC_DIR = config.PROC_DIR
+OUT_DIR  = config.OUT_DIR
 FIG_DIR  = config.FIG_DIR
 FIG_DIR.mkdir(parents=True, exist_ok=True)
+OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 SEED = config.SEED
 
@@ -1370,7 +1372,7 @@ def benchmark_ch2_12m(snapshot: pd.DataFrame,
     Returns (scores aligned to snapshot.index, source description), or
     (None, reason) if neither path is available.
     """
-    results_path = PROC_DIR / "pd_xgb_results.csv"
+    results_path = OUT_DIR / "pd_xgb_results.csv"
     if results_path.exists():
         head = pd.read_csv(results_path, nrows=5)
         if {"loan_seq_num", "report_date"}.issubset(head.columns):
@@ -1891,7 +1893,7 @@ def main() -> None:
     logit_model.fit(X_tr, y_tr)
 
     coef_table = logit_model.coefficient_table()
-    coef_table.to_csv(PROC_DIR / "discrete_hazard_logit_coefficients.csv", index=False)
+    coef_table.to_csv(OUT_DIR / "discrete_hazard_logit_coefficients.csv", index=False)
     log.info("  Coefficients → discrete_hazard_logit_coefficients.csv")
     log.info("  Categorical reference levels: %s",
              logit_model.design.reference_levels_ or "none")
@@ -1908,7 +1910,7 @@ def main() -> None:
     log.info("[4/8] Proportional hazards likelihood-ratio tests (linear model) …")
     ph_tests = proportional_hazards_lr_test(logit_model, X_tr, y_tr)
     if not ph_tests.empty:
-        ph_tests.to_csv(PROC_DIR / "discrete_hazard_logit_ph_tests.csv", index=False)
+        ph_tests.to_csv(OUT_DIR / "discrete_hazard_logit_ph_tests.csv", index=False)
         log.info("  PH tests → discrete_hazard_logit_ph_tests.csv")
         log.info("  The XGBoost challenger makes no proportional hazards "
                  "assumption, so no equivalent test applies to it.")
@@ -1953,7 +1955,7 @@ def main() -> None:
             calib = decile_calibration(y_snapshot, pd_12m)
             calibration_tables[name] = calib
             calib.assign(model=name).to_csv(
-                PROC_DIR / f"discrete_hazard_{name}_decile_calibration.csv", index=False)
+                OUT_DIR / f"discrete_hazard_{name}_decile_calibration.csv", index=False)
             plot_decile_calibration(
                 {name: calib},
                 f"discrete_hazard_{name}_calibration.png",
@@ -2004,7 +2006,7 @@ def main() -> None:
              pit.reset_index(drop=True), ttc.reset_index(drop=True)], axis=1,
         )
         horizon_df["actual_default"] = scored[TARGET_12M].to_numpy()
-        out_path = PROC_DIR / f"discrete_hazard_{name}_pd_horizons.csv"
+        out_path = OUT_DIR / f"discrete_hazard_{name}_pd_horizons.csv"
         horizon_df.to_csv(out_path, index=False)
         log.info("  [%s] Horizon PDs → %s", name, out_path.name)
         for col in [c for c in horizon_df.columns
@@ -2050,7 +2052,7 @@ def main() -> None:
 
     for name in models:
         sub = metrics_df[metrics_df["model"] == name]
-        sub.to_csv(PROC_DIR / f"discrete_hazard_{name}_metrics.csv", index=False)
+        sub.to_csv(OUT_DIR / f"discrete_hazard_{name}_metrics.csv", index=False)
         log.info("  %s metrics → discrete_hazard_%s_metrics.csv", name, name)
 
     # One table, both metric sets: the monthly-hazard rows carry AUROC and
@@ -2064,7 +2066,7 @@ def main() -> None:
     cols = [c for c in preferred if c in metrics_df.columns]
     cols += [c for c in metrics_df.columns if c not in cols]
     comparison = metrics_df[cols].sort_values(["metric_set", "split", "model"])
-    comparison.to_csv(PROC_DIR / "discrete_hazard_comparison.csv", index=False)
+    comparison.to_csv(OUT_DIR / "discrete_hazard_comparison.csv", index=False)
     log.info("  Comparison → discrete_hazard_comparison.csv")
     log.info("\n%s", comparison.to_string(index=False))
 

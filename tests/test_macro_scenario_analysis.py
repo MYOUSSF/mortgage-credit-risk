@@ -14,14 +14,14 @@ import pytest
 
 
 def test_load_base_lgd_falls_back_when_champion_summary_is_missing(macro_scenario, tmp_path, monkeypatch):
-    monkeypatch.setattr(macro_scenario, "PROC_DIR", tmp_path)  # empty dir — no CSV
+    monkeypatch.setattr(macro_scenario, "OUT_DIR", tmp_path)  # empty dir — no CSV
     base_lgd, source = macro_scenario.load_base_lgd()
     assert base_lgd == macro_scenario.config.MACRO_LGD_ASSUMPTION
     assert "fallback" in source
 
 
 def test_load_base_lgd_uses_champion_summary_when_present(macro_scenario, tmp_path, monkeypatch):
-    monkeypatch.setattr(macro_scenario, "PROC_DIR", tmp_path)
+    monkeypatch.setattr(macro_scenario, "OUT_DIR", tmp_path)
     pd.DataFrame([{
         "champion_model": "XGBoost", "anchor_split": "OOS",
         "anchor_mean_lgd": 0.28, "n_anchor_obs": 42,

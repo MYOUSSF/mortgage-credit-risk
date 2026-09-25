@@ -102,8 +102,10 @@ log = logging.getLogger(__name__)
 # =============================================================================
 
 PROC_DIR = config.PROC_DIR
+OUT_DIR  = config.OUT_DIR
 FIG_DIR  = config.FIG_DIR
 FIG_DIR.mkdir(parents=True, exist_ok=True)
+OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 TARGET = config.TARGET_PD
 N_BINS = 10
@@ -349,7 +351,7 @@ def main() -> None:
     log.info("")
     log.info("[2/4] Computing feature-level PSI against training reference …")
     feature_psi = monitor_features(train, periods, features_present)
-    feature_psi.to_csv(PROC_DIR / "monitoring_feature_psi.csv", index=False)
+    feature_psi.to_csv(OUT_DIR / "monitoring_feature_psi.csv", index=False)
 
     breaches = feature_psi[feature_psi["flag"] != "Stable"]
     if not breaches.empty:
@@ -361,18 +363,18 @@ def main() -> None:
     log.info("")
     log.info("[3/4] Computing score-level PSI and default-rate drift …")
 
-    score_path = PROC_DIR / "pd_lr_results.csv"
+    score_path = OUT_DIR / "pd_lr_results.csv"
     if score_path.exists():
         scores = pd.read_csv(score_path, parse_dates=["report_date"])
         score_psi = monitor_score(scores)
-        score_psi.to_csv(PROC_DIR / "monitoring_score_psi.csv", index=False)
+        score_psi.to_csv(OUT_DIR / "monitoring_score_psi.csv", index=False)
         log.info("\n%s", score_psi.to_string(index=False))
     else:
         log.warning("  %s not found — run 02_pd_logistic_regression.py first "
                     "to enable score-level monitoring. Skipping.", score_path)
 
     default_rate = monitor_default_rate(train, periods)
-    default_rate.to_csv(PROC_DIR / "monitoring_default_rate.csv", index=False)
+    default_rate.to_csv(OUT_DIR / "monitoring_default_rate.csv", index=False)
     log.info("\n%s", default_rate.to_string(index=False))
 
     log.info("")

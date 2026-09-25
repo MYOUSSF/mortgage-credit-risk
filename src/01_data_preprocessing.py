@@ -79,10 +79,17 @@ log = logging.getLogger(__name__)
 
 RAW_DIR   = config.RAW_DIR
 MACRO_DIR = config.MACRO_DIR
-OUT_DIR   = config.PROC_DIR
+# PROC_DIR holds the processed DATASETS this script produces (the pd_*,
+# lgd_* and surv_* parquet files). OUT_DIR holds derived artifacts — here
+# just the IV and PSI summaries. They are the same directory unless
+# MCR_OUT_DIR says otherwise; downstream scripts can then read PROC_DIR from
+# a read-only mount while still writing their own results.
+PROC_DIR  = config.PROC_DIR
+OUT_DIR   = config.OUT_DIR
 CHUNK_DIR = config.CHUNK_DIR
 
 OUT_DIR.mkdir(parents=True, exist_ok=True)
+PROC_DIR.mkdir(parents=True, exist_ok=True)
 CHUNK_DIR.mkdir(parents=True, exist_ok=True)
 
 START_YEAR = 2000
@@ -1799,16 +1806,16 @@ def main() -> None:
     log.info("")
     log.info("[4/4] Saving outputs to %s …", OUT_DIR.resolve())
 
-    pd_train.to_parquet(OUT_DIR / "pd_train.parquet",   index=False)
-    pd_oos.to_parquet(  OUT_DIR / "pd_oos.parquet",     index=False)
-    pd_oot.to_parquet(  OUT_DIR / "pd_oot.parquet",     index=False)
+    pd_train.to_parquet(PROC_DIR / "pd_train.parquet",   index=False)
+    pd_oos.to_parquet(  PROC_DIR / "pd_oos.parquet",     index=False)
+    pd_oot.to_parquet(  PROC_DIR / "pd_oot.parquet",     index=False)
     iv_summary.to_csv(  OUT_DIR / "pd_iv_summary.csv",  index=False)
     psi_all.to_csv(     OUT_DIR / "pd_psi_summary.csv", index=False)
 
     if not lgd_all.empty:
-        lgd_train.to_parquet(OUT_DIR / "lgd_train.parquet", index=False)
-        lgd_oos.to_parquet(  OUT_DIR / "lgd_oos.parquet",   index=False)
-        lgd_oot.to_parquet(  OUT_DIR / "lgd_oot.parquet",   index=False)
+        lgd_train.to_parquet(PROC_DIR / "lgd_train.parquet", index=False)
+        lgd_oos.to_parquet(  PROC_DIR / "lgd_oos.parquet",   index=False)
+        lgd_oot.to_parquet(  PROC_DIR / "lgd_oot.parquet",   index=False)
 
     # ── Competing-risks variant ─────────────────────────────────────────
     # Emitted alongside pd_* / lgd_*, never in place of them.
@@ -1829,7 +1836,7 @@ def main() -> None:
         log.info("")
         log.info("[+] Writing the competing-risks variant (streamed per "
                  "origination-year chunk) …")
-        stats = stream_survival_splits(surv_files, OUT_DIR)
+        stats = stream_survival_splits(surv_files, PROC_DIR)
 
         n_loans = sum(stats["events"].values())
         log.info("  Competing-risks panel: %s loan-months across %s loans",

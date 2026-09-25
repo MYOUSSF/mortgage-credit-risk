@@ -130,8 +130,10 @@ log = logging.getLogger(__name__)
 # =============================================================================
 
 PROC_DIR = config.PROC_DIR
+OUT_DIR  = config.OUT_DIR
 FIG_DIR  = config.FIG_DIR
 FIG_DIR.mkdir(parents=True, exist_ok=True)
+OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 RATING_SCALE  = config.RATING_SCALE
 CORRELATION   = config.BASEL_RETAIL_MORTGAGE_CORRELATION
@@ -226,7 +228,7 @@ def load_ttc_pd() -> tuple[pd.DataFrame, str]:
 
     Returns (DataFrame[loan_seq_num, ttc_pd], source_description).
     """
-    calib_path = PROC_DIR / "ttc_calibrated_pd.csv"
+    calib_path = OUT_DIR / "ttc_calibrated_pd.csv"
     if calib_path.exists():
         df = pd.read_csv(calib_path)
         if not df.empty and "ttc_pd" in df.columns:
@@ -234,7 +236,7 @@ def load_ttc_pd() -> tuple[pd.DataFrame, str]:
             return out, f"{calib_path.name} (LRADR-anchored calibrated PD)"
 
     capital_model = getattr(config, "DISCRETE_HAZARD_CAPITAL_MODEL", "logit")
-    hazard_path = PROC_DIR / f"discrete_hazard_{capital_model}_pd_horizons.csv"
+    hazard_path = OUT_DIR / f"discrete_hazard_{capital_model}_pd_horizons.csv"
     if hazard_path.exists():
         df = pd.read_csv(hazard_path)
         if not df.empty and "ttc_pd_12m" in df.columns:
@@ -244,7 +246,7 @@ def load_ttc_pd() -> tuple[pd.DataFrame, str]:
             return out, (f"{hazard_path.name} (macro-neutral discrete-time "
                          f"hazard, {capital_model} model)")
 
-    survival_path = PROC_DIR / "survival_pd_horizons.csv"
+    survival_path = OUT_DIR / "survival_pd_horizons.csv"
     if survival_path.exists():
         df = pd.read_csv(survival_path)
         if not df.empty and "ttc_pd_12m" in df.columns:
@@ -275,7 +277,7 @@ def load_base_lgd() -> tuple[float, str]:
     the same optional-input-with-fallback pattern used in
     07_macro_scenario_analysis.py's load_base_lgd().
     """
-    path = PROC_DIR / "lgd_champion_summary.csv"
+    path = OUT_DIR / "lgd_champion_summary.csv"
     if not path.exists():
         log.warning(
             "  %s not found — run 04_lgd_models.py first to anchor LGD on "
@@ -444,7 +446,7 @@ def main() -> None:
     by_loan["rwa"] = compute_rwa(by_loan["capital_k"].values, by_loan["ead"].values)
     by_loan["capital_required"] = by_loan["rwa"] * MIN_CAP_RATIO
 
-    by_loan.to_csv(PROC_DIR / "basel_irb_capital_by_loan.csv", index=False)
+    by_loan.to_csv(OUT_DIR / "basel_irb_capital_by_loan.csv", index=False)
     log.info("  Per-loan capital → data/processed/basel_irb_capital_by_loan.csv")
 
     by_grade = (
@@ -465,7 +467,7 @@ def main() -> None:
             "total_capital_M": "total_capital_$M",
         })
     )
-    by_grade.to_csv(PROC_DIR / "basel_irb_capital_by_grade.csv", index=False)
+    by_grade.to_csv(OUT_DIR / "basel_irb_capital_by_grade.csv", index=False)
     log.info("  Grade-level summary → data/processed/basel_irb_capital_by_grade.csv")
 
     total_ead      = by_loan["ead"].sum()

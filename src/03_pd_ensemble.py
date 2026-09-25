@@ -128,9 +128,10 @@ DEVICE, N_GPUS = config.detect_gpu()
 # =============================================================================
 
 PROC_DIR = config.PROC_DIR
-OUT_DIR  = config.PROC_DIR
+OUT_DIR  = config.OUT_DIR
 FIG_DIR  = config.FIG_DIR
 FIG_DIR.mkdir(parents=True, exist_ok=True)
+OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 TARGET = config.TARGET_PD
 SEED   = config.SEED
@@ -487,8 +488,8 @@ def main() -> None:
     gc.collect()
 
     # Load Ch.1 LR results for side-by-side comparison
-    lr_results_path = PROC_DIR / "pd_lr_results.csv"
-    lr_metrics_path = PROC_DIR / "pd_lr_metrics.csv"
+    lr_results_path = OUT_DIR / "pd_lr_results.csv"
+    lr_metrics_path = OUT_DIR / "pd_lr_metrics.csv"
 
     if lr_results_path.exists():
         log.info("")

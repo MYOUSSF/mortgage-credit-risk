@@ -171,9 +171,10 @@ log = logging.getLogger(__name__)
 # =============================================================================
 
 PROC_DIR = config.PROC_DIR
-OUT_DIR  = config.PROC_DIR
+OUT_DIR  = config.OUT_DIR
 FIG_DIR  = config.FIG_DIR
 FIG_DIR.mkdir(parents=True, exist_ok=True)
+OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 TARGET = config.TARGET_LGD
 SEED   = config.SEED

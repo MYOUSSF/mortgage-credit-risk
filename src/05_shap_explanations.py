@@ -118,8 +118,10 @@ DEVICE, _N_GPUS = config.detect_gpu()  # called after log is initialised
 # =============================================================================
 
 PROC_DIR = config.PROC_DIR
+OUT_DIR  = config.OUT_DIR
 FIG_DIR  = config.FIG_DIR
 FIG_DIR.mkdir(parents=True, exist_ok=True)
+OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 TARGET = config.TARGET_PD
 SEED   = config.SEED
@@ -682,7 +684,7 @@ def main() -> None:
     sv_df["log_odds"]    = log_odds
     sv_df["predicted_pd"] = 1 / (1 + np.exp(-log_odds))
     sv_df["actual_default"] = y_shap
-    sv_df.to_parquet(PROC_DIR / "shap_values_oos.parquet", index=False)
+    sv_df.to_parquet(OUT_DIR / "shap_values_oos.parquet", index=False)
     log.info("  SHAP matrix saved → data/processed/shap_values_oos.parquet")
 
     # ── Plots ─────────────────────────────────────────────────────────────
@@ -719,7 +721,7 @@ def main() -> None:
     log.info("")
     log.info("[6/6] Building SHAP segment report …")
     report_df = plot_segment_report(shap_values, log_odds, y_shap, feats)
-    report_df.to_csv(PROC_DIR / "shap_segment_report.csv", index=False)
+    report_df.to_csv(OUT_DIR / "shap_segment_report.csv", index=False)
     log.info("  Segment report:\n%s", report_df.to_string(index=False))
 
     log.info("")

@@ -120,8 +120,10 @@ log = logging.getLogger(__name__)
 # =============================================================================
 
 PROC_DIR = config.PROC_DIR
+OUT_DIR  = config.OUT_DIR
 FIG_DIR  = config.FIG_DIR
 FIG_DIR.mkdir(parents=True, exist_ok=True)
+OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 TARGET   = config.TARGET_PD
 N_BINS   = 10     # calibration diagram bins
@@ -553,8 +555,8 @@ def main() -> None:
 
     models_available = {}
     for model_name, path, score_col in [
-        ("LR",  PROC_DIR / "pd_lr_results.csv",  "score"),
-        ("XGB", PROC_DIR / "pd_xgb_results.csv", "xgb_score"),
+        ("LR",  OUT_DIR / "pd_lr_results.csv",  "score"),
+        ("XGB", OUT_DIR / "pd_xgb_results.csv", "xgb_score"),
     ]:
         if path.exists():
             df = pd.read_csv(path)
@@ -649,7 +651,7 @@ def main() -> None:
     log.info("")
     log.info("[3/6] Saving calibration metrics …")
     metrics_df = pd.DataFrame(all_metrics)
-    metrics_df.to_csv(PROC_DIR / "calibration_metrics.csv", index=False)
+    metrics_df.to_csv(OUT_DIR / "calibration_metrics.csv", index=False)
     log.info("\n  Calibration metrics summary:")
     display_cols = [c for c in ["label", "brier", "ece", "mce", "bias", "hl_pval"]
                     if c in metrics_df.columns]
@@ -657,7 +659,7 @@ def main() -> None:
 
     if calibrated_dfs:
         pd.concat(calibrated_dfs, ignore_index=True).to_csv(
-            PROC_DIR / "calibrated_scores_oos.csv", index=False
+            OUT_DIR / "calibrated_scores_oos.csv", index=False
         )
         log.info("  Calibrated scores → data/processed/calibrated_scores_oos.csv")
 
@@ -734,7 +736,7 @@ def main() -> None:
             "pit_pd_platt": pit_pd_platt,
             "ttc_pd":       ttc_pd,
         })
-        ttc_df.to_csv(PROC_DIR / "ttc_calibrated_pd.csv", index=False)
+        ttc_df.to_csv(OUT_DIR / "ttc_calibrated_pd.csv", index=False)
 
         log.info("  Model: %s  |  LRADR (long-run average default rate): %.4f%%",
                  first_model, lradr * 100)

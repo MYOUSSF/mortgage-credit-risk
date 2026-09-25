@@ -145,6 +145,34 @@ python 10_basel_irb_capital.py        # Rating master scale + Basel IRB RWA/capi
 
 Every script imports `config.py` for values that must stay identical across the pipeline: the random seed, the train/OOS/OOT split boundary, the default-event codes, the PD/LGD feature lists, GPU detection, the plot theme, the shared logging setup, PSI/IV rating thresholds, and the IFRS 9 macro scenario assumptions. Each script keeps its own local name for what it imports (e.g. `TARGET = config.TARGET_PD`), so change an assumption once in `config.py` and every script that depends on it picks it up — there's no second or third copy of `DEFAULT_CODES` or the macro scenario shocks to remember to update.
 
+### Running on Kaggle (or any chained-notebook setup)
+
+All paths are environment-driven, so nothing in `src/` needs editing to move between machines:
+
+| Variable | Default | What it holds |
+|---|---|---|
+| `MCR_DATA_DIR` | `<repo>/data` | Root for everything below |
+| `MCR_RAW_DIR` | `$MCR_DATA_DIR/raw/freddie_mac` | Raw Freddie Mac `.txt` files |
+| `MCR_MACRO_DIR` | `$MCR_DATA_DIR/macro` | HPI / unemployment / PMMS |
+| `MCR_PROC_DIR` | `$MCR_DATA_DIR/processed` | Processed **datasets** — the `pd_*`, `lgd_*`, `surv_*` parquet |
+| `MCR_OUT_DIR` | **`$MCR_PROC_DIR`** | Derived **artifacts** — metrics, coefficients, per-loan scores |
+| `MCR_FIG_DIR` | `$MCR_DATA_DIR/figures` | Figures |
+
+`MCR_OUT_DIR` defaults to `MCR_PROC_DIR`, so with nothing set everything lands in `data/processed/` and every path quoted in this README and the model cards stays correct.
+
+**Why the split exists.** Script `01` is slow (~20 min), so its parquet output is usually produced once and then attached to later notebooks as an input dataset — which Kaggle mounts **read-only**. Scripts `02`–`12` read those datasets *and* write their own results, and if both point at the same directory the write fails with `OSError: [Errno 30] Read-only file system`. Separating the two fixes it:
+
+```python
+import os
+os.environ["MCR_PROC_DIR"] = "/kaggle/input/<your-notebook-output>/data/processed"  # read-only
+os.environ["MCR_OUT_DIR"]  = "/kaggle/working/data/outputs"                          # writable
+os.environ["MCR_FIG_DIR"]  = "/kaggle/working/data/figures"
+```
+
+Set these **before** importing any pipeline module: each script binds `PROC_DIR`/`OUT_DIR`/`FIG_DIR` at import time, so changing the environment afterwards has no effect in an already-imported kernel.
+
+When running `01` itself, `MCR_PROC_DIR` must point somewhere writable — that is where the parquet is produced.
+
 ### Testing
 
 ```bash

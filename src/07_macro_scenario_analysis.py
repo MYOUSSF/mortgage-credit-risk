@@ -153,8 +153,10 @@ DEVICE, _N_GPUS = config.detect_gpu()
 # =============================================================================
 
 PROC_DIR = config.PROC_DIR
+OUT_DIR  = config.OUT_DIR
 FIG_DIR  = config.FIG_DIR
 FIG_DIR.mkdir(parents=True, exist_ok=True)
+OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 TARGET      = config.TARGET_PD
 SEED        = config.SEED
@@ -319,7 +321,7 @@ def load_expected_life() -> pd.DataFrame | None:
     absent -> None, and amortized_ead() keeps using the contractual term,
     which reproduces the pre-competing-risks behaviour exactly.
     """
-    path = PROC_DIR / config.CR_EXPECTED_LIFE_FILE
+    path = OUT_DIR / config.CR_EXPECTED_LIFE_FILE
     if not path.exists():
         log.warning(
             "  %s not found — falling back to CONTRACTUAL maturity for the "
@@ -1028,7 +1030,7 @@ def load_base_lgd() -> tuple[float, str]:
 
     Returns (base_lgd, source_description) for logging/traceability.
     """
-    path = PROC_DIR / "lgd_champion_summary.csv"
+    path = OUT_DIR / "lgd_champion_summary.csv"
     if not path.exists():
         log.warning(
             "  %s not found — run 04_lgd_models.py first to anchor LGD on "
@@ -1089,7 +1091,7 @@ def main() -> None:
     log.info("")
     log.info("[3/5] Building %d-quarter macro paths ...", N_QUARTERS)
     macro_df = build_macro_paths(current_ur=current_ur)
-    macro_df.to_csv(PROC_DIR / "ifrs9_macro_paths.csv", index=False)
+    macro_df.to_csv(OUT_DIR / "ifrs9_macro_paths.csv", index=False)
 
     # Log path summary
     for scenario in SCENARIOS:
@@ -1150,8 +1152,8 @@ def main() -> None:
         base_lgd=base_lgd, expected_life_months=expected_life,
     )
 
-    ecl_by_loan.to_csv(PROC_DIR / "ifrs9_ecl_by_loan.csv", index=False)
-    ecl_summary.to_csv(PROC_DIR / "ifrs9_ecl_summary.csv", index=False)
+    ecl_by_loan.to_csv(OUT_DIR / "ifrs9_ecl_by_loan.csv", index=False)
+    ecl_summary.to_csv(OUT_DIR / "ifrs9_ecl_summary.csv", index=False)
 
     log.info("")
     log.info("  IFRS 9 ECL Summary:")
@@ -1199,8 +1201,8 @@ def main() -> None:
         "total_staged_ecl_weighted_$M": round(float(staged_df["staged_ecl_weighted"].sum() / 1e6), 3),
     }
 
-    staged_df.to_csv(PROC_DIR / "ifrs9_staged_ecl_by_loan.csv", index=False)
-    staged_summary.to_csv(PROC_DIR / "ifrs9_staged_ecl_summary.csv", index=False)
+    staged_df.to_csv(OUT_DIR / "ifrs9_staged_ecl_by_loan.csv", index=False)
+    staged_summary.to_csv(OUT_DIR / "ifrs9_staged_ecl_summary.csv", index=False)
 
     log.info("")
     log.info("  IFRS 9 Staged ECL Summary (probability-weighted):")

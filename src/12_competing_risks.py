@@ -145,8 +145,10 @@ log = logging.getLogger(__name__)
 # =============================================================================
 
 PROC_DIR = config.PROC_DIR
+OUT_DIR  = config.OUT_DIR
 FIG_DIR  = config.FIG_DIR
 FIG_DIR.mkdir(parents=True, exist_ok=True)
+OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 SEED = config.SEED
 
@@ -897,7 +899,7 @@ def main() -> None:
     # ── [1/6] Load ───────────────────────────────────────────────────────
     log.info("")
     log.info("[1/6] Loading the competing-risks panel …")
-    train_path = PROC_DIR / config.SURV_TRAIN_FILE
+    train_path = OUT_DIR / config.SURV_TRAIN_FILE
     if not train_path.exists():
         log.error("  %s not found. Re-run 01_data_preprocessing.py — it now "
                   "emits the surv_* variant alongside pd_*.", train_path)
@@ -940,7 +942,7 @@ def main() -> None:
         summary.insert(0, "cause", name)
         coef_frames.append(summary)
     pd.concat(coef_frames, ignore_index=True).to_csv(
-        PROC_DIR / config.CR_COX_COEFS_FILE, index=False)
+        OUT_DIR / config.CR_COX_COEFS_FILE, index=False)
     log.info("  Coefficients → %s", config.CR_COX_COEFS_FILE)
 
     log.info("")
@@ -988,7 +990,7 @@ def main() -> None:
                     "std_err_clustered": float(np.asarray(bse)[i, j]),
                 })
         pd.DataFrame(rows).to_csv(
-            PROC_DIR / config.CR_MULTINOMIAL_COEFS_FILE, index=False)
+            OUT_DIR / config.CR_MULTINOMIAL_COEFS_FILE, index=False)
         log.info("  Coefficients (clustered SEs) → %s",
                  config.CR_MULTINOMIAL_COEFS_FILE)
 
@@ -1005,7 +1007,7 @@ def main() -> None:
     log.info("")
     log.info("[5/6] Building the comparison table …")
     comparison = build_comparison(times, cox_curves, mn_curves)
-    comparison.to_csv(PROC_DIR / config.CR_COMPARISON_FILE, index=False)
+    comparison.to_csv(OUT_DIR / config.CR_COMPARISON_FILE, index=False)
     log.info("\n%s", comparison.to_string(index=False))
     log.info("  → %s", config.CR_COMPARISON_FILE)
 
@@ -1035,7 +1037,7 @@ def main() -> None:
         "cif_prepay_multinomial": mn_curves["cif_prepay"],
         "survival_multinomial": mn_curves["survival"],
     })
-    curves.to_csv(PROC_DIR / config.CR_CIF_CURVES_FILE, index=False)
+    curves.to_csv(OUT_DIR / config.CR_CIF_CURVES_FILE, index=False)
     log.info("  Curves → %s", config.CR_CIF_CURVES_FILE)
 
     # ── [6/6] Expected life for Chapter 6 ────────────────────────────────
@@ -1071,7 +1073,7 @@ def main() -> None:
                                                       "expected_life_months", "split"]))
     per_loan_life = life["expected_life_months"].to_numpy(dtype=float)
     log.info("  Scored %s loans across %d split(s).", f"{len(life):,}", len(life_frames))
-    life.to_csv(PROC_DIR / config.CR_EXPECTED_LIFE_FILE, index=False)
+    life.to_csv(OUT_DIR / config.CR_EXPECTED_LIFE_FILE, index=False)
     log.info("  Expected life: mean=%.1f  median=%.1f  months (grid capped at %d)",
              per_loan_life.mean(), np.median(per_loan_life), max_month)
     if "remaining_months" in loans.columns:

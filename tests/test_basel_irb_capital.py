@@ -77,7 +77,7 @@ def _hazard_filename(basel_irb_capital) -> str:
 
 
 def test_load_ttc_pd_prefers_calibration_output(basel_irb_capital, tmp_path, monkeypatch):
-    monkeypatch.setattr(basel_irb_capital, "PROC_DIR", tmp_path)
+    monkeypatch.setattr(basel_irb_capital, "OUT_DIR", tmp_path)
     pd.DataFrame({
         "loan_seq_num": ["L1", "L2"], "split": ["oos-eval", "oot"],
         "pit_pd_platt": [0.02, 0.03], "ttc_pd": [0.015, 0.025],
@@ -103,7 +103,7 @@ def test_load_ttc_pd_prefers_discrete_hazard_over_cox(basel_irb_capital, tmp_pat
     off each loan's last observed row and whose horizon PD is measured from
     origination rather than conditional on current age.
     """
-    monkeypatch.setattr(basel_irb_capital, "PROC_DIR", tmp_path)
+    monkeypatch.setattr(basel_irb_capital, "OUT_DIR", tmp_path)
     pd.DataFrame({
         "loan_seq_num": ["L1", "L2"], "ttc_pd_12m": [0.012, 0.031],
     }).to_csv(tmp_path / _hazard_filename(basel_irb_capital), index=False)
@@ -120,7 +120,7 @@ def test_load_ttc_pd_prefers_discrete_hazard_over_cox(basel_irb_capital, tmp_pat
 
 def test_load_ttc_pd_falls_back_to_survival_analysis(basel_irb_capital, tmp_path, monkeypatch):
     """Cox remains the last resort when neither better source has been run."""
-    monkeypatch.setattr(basel_irb_capital, "PROC_DIR", tmp_path)
+    monkeypatch.setattr(basel_irb_capital, "OUT_DIR", tmp_path)
     pd.DataFrame({
         "loan_seq_num": ["L1"], "ttc_pd_12m": [0.04],
     }).to_csv(tmp_path / "survival_pd_horizons.csv", index=False)
@@ -137,7 +137,7 @@ def test_load_ttc_pd_honours_the_configured_capital_model(basel_irb_capital,
     config.DISCRETE_HAZARD_CAPITAL_MODEL selects which discrete-hazard model
     feeds capital; a file for the other model must not be picked up.
     """
-    monkeypatch.setattr(basel_irb_capital, "PROC_DIR", tmp_path)
+    monkeypatch.setattr(basel_irb_capital, "OUT_DIR", tmp_path)
     monkeypatch.setattr(basel_irb_capital.config,
                         "DISCRETE_HAZARD_CAPITAL_MODEL", "xgb")
     pd.DataFrame({
@@ -154,7 +154,7 @@ def test_load_ttc_pd_honours_the_configured_capital_model(basel_irb_capital,
 
 
 def test_load_ttc_pd_returns_empty_when_no_source_exists(basel_irb_capital, tmp_path, monkeypatch):
-    monkeypatch.setattr(basel_irb_capital, "PROC_DIR", tmp_path)
+    monkeypatch.setattr(basel_irb_capital, "OUT_DIR", tmp_path)
     out, source = basel_irb_capital.load_ttc_pd()
     assert out.empty
     assert source == "none available"
