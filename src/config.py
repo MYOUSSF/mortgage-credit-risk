@@ -53,20 +53,7 @@ RAW_DIR   = Path(os.environ.get("MCR_RAW_DIR",  DATA_DIR/"raw"/"freddie_mac"))
 PROC_DIR  = Path(os.environ.get("MCR_PROC_DIR", DATA_DIR/"processed"))
 MACRO_DIR = Path(os.environ.get("MCR_MACRO_DIR", DATA_DIR/"macro"))
 
-# Figure output. Every plotting script (02-12) does FIG_DIR.mkdir(...) at
-# import time, so this name is load-bearing for eleven of them.
-# Derived artifacts (metrics, coefficients, per-loan scores) as distinct from
-# the processed DATASETS in PROC_DIR. Separating the two is what lets a run
-# read its inputs from a read-only mount — a Kaggle notebook-output dataset,
-# say — while still writing its own results somewhere writable:
-#
-#     MCR_PROC_DIR=/kaggle/input/.../data/processed   (read-only parquet)
-#     MCR_OUT_DIR=/kaggle/working/data/outputs        (writable)
-#
-# Defaults to PROC_DIR, so with no environment set everything lands in
-# data/processed/ exactly as before and every path in the README and the
-# model cards stays correct.
-OUT_DIR = Path(os.environ.get("MCR_OUT_DIR", PROC_DIR))
+OUT_DIR = Path(os.environ.get("MCR_OUT_DIR", DATA_DIR/"outputs"))
 FIG_DIR = Path(os.environ.get("MCR_FIG_DIR", DATA_DIR/"figures"))
 # Scratch space for 01_data_preprocessing.py's per-origination-year chunks.
 # Lives under PROC_DIR because 01 removes the directory once the chunks have
