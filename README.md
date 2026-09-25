@@ -2,27 +2,108 @@
 
 **Probability of Default · Loss Given Default · SHAP · Survival Analysis · Macro Stress Testing · Calibration**
 
-Credit Risk Modelling implemented on the Freddie Mac Single-Family Loan Performance dataset (2000–2020, 200M+ loan-month records).
+Credit Risk Modelling implemented on the Freddie Mac Single-Family Loan Performance dataset (2000–2020 vintages, ~1.05M loans, ~64M loan-month records).
 
 ---
 
 ## Key Results
 
-| Model | AUROC (OOS) | KS (OOS) | Gini (OOS) |
-|---|---|---|---|
-| Logistic Regression (Ch.1) | ~0.87 | ~0.58 | ~0.74 |
-| XGBoost (Ch.2) | ~0.91 | ~0.64 | ~0.82 |
-| Discrete-Time Hazard — Logistic (Ch.5b) | TBD — regenerate after running | TBD | TBD |
-| Discrete-Time Hazard — XGBoost (Ch.5b) | TBD — regenerate after running | TBD | TBD |
+All figures below come from the full-dataset run on Kaggle (notebooks 1, 2, 3, 5 and 8), not from the bundled sample data. The OOS set is a random 30% holdout; the OOT set is a later period never seen in training, with a much lower default rate (0.12% of loan-months vs 0.58% in training).
 
-Results evaluated on a held-out 30% OOS set and a temporal OOT set (2017–2024) never seen during training.
+**12-month PD classifiers** (Ch.1, Ch.2): current delinquency is an input
+
+| Model | AUROC OOS | KS OOS | Gini OOS | AUROC OOT | Gini OOT |
+|---|---|---|---|---|---|
+| Logistic Regression (Ch.1) | 0.946 | 0.750 | 0.891 | 0.962 | 0.923 |
+| XGBoost (Ch.2) | 0.951 | 0.760 | 0.901 | 0.964 | 0.929 |
+
+**Discrete-time hazard models** (Ch.5b): delinquency excluded, forward-looking from loan characteristics only
+
+| Model | Monthly hazard AUROC OOS / OOT | 12m PD AUROC (OOT snapshots) | 12m KS | 12m Gini | Predicted ÷ observed 12m PD |
+|---|---|---|---|---|---|
+| Logit hazard (champion) | 0.916 / 0.903 | 0.886 | 0.614 | 0.772 | 1.27 |
+| XGBoost hazard (challenger) | 0.919 / 0.924 | 0.906 | 0.670 | 0.812 | 0.80 |
+| Ch.2 XGBoost, same rows (benchmark) | — | 0.905 | 0.658 | 0.810 | 36.2 |
+
+The 12-month rows are scored on the same 506,733 OOT loan-months at three snapshot dates (2018-06, 2019-06, 2020-06), whose 12-month outcome is fully observed.
+
+**LGD** (Ch.3), OOS: the Fractional Response Model is champion, with RMSE 0.234, R² 0.385 and mean predicted LGD 0.503.
+
+**Competing risks** (Ch.10): treating prepayment as censoring overstates PD measured from origination by **+47% at 36 months** and **~5× over the loan's life** (12.9% vs 2.6%).
 
 > **The Cox PH concordance previously reported here (~0.85–0.89) has been removed as invalid.** It was
 > computed on a dataset where each loan's time-varying covariates were read off its *last* observed row
 > — the month immediately before default, for a defaulter — so the model was scored on the borrower's
 > state at the brink of default. See [Ch.5](#ch5--survival-analysis-superseded) for the full disclosure.
-> Ch.5b replaces it; its metrics are marked TBD until `11_discrete_hazard.py` has been run on the full
-> panel, and are produced into `discrete_hazard_comparison.csv` rather than transcribed by hand.
+> The Ch.5b figures above replace it, and come from `discrete_hazard_comparison.csv` rather than being transcribed by hand.
+
+---
+
+## Findings
+
+What the full-dataset run shows, notebook by notebook. Figures are from the saved notebook outputs.
+
+### Data (Notebook 1)
+
+- **Scale.** 21 origination vintages (2000–2020) × 50,000 sampled loans gives ~1.05M loans. That is 64.2M loan-months in the competing-risks panel and 42.9M in the PD panel after the right-censoring filter.
+- **The crisis signature is clear.** About 8–9% of 2006–2007 loans eventually defaulted (4,066 and 4,479 of 50,000), against under 1% for every vintage from 2009 onwards and 0.2% for 2016. Cumulative 60-month default reaches 3.8% for the 2006 vintage and 5.5% for 2007, against 0.4–0.8% for 2000–2004.
+- **Prepayment, not default, is how mortgages end.** 87% of loans prepay. On the competing-risks training panel there are 37 prepayments for every default.
+- **Strong population shift into OOT.** PSI between training and OOT exceeds the 0.25 "major shift" threshold for `ur_3m_lag` (13.1), `orig_interest_rate` (1.55) and `hpi_change` (1.06). The OOT window covers the 2020 unemployment spike and a very different rate environment, so the OOT metrics are a genuine out-of-regime test.
+
+### PD classifiers (Notebook 2)
+
+- **Current delinquency dominates.** `delinquency_indicator` has an IV of 2.13 and 79% of XGBoost's total gain. The next features are `orig_interest_rate` (IV 1.31), `hpi_change` (1.18) and `loan_age` (0.80). Much of the ~0.95 AUROC comes from recognising loans that are already delinquent.
+- **XGBoost's edge over logistic regression is small:** +0.005 AUROC and +0.010 KS on OOS, and less on OOT. WoE-binned logistic regression captures most of the signal.
+- **Both models hold up out of time.** OOT AUROC is higher than OOS for both, despite the population shift above. The OOT default rate is about five times lower, so this is not a like-for-like comparison.
+- **The raw scores are not probabilities.** Both models reweight defaults about 172× (`class_weight='balanced'` / `scale_pos_weight`), so the score distributions are bimodal and centred far above the true default rate. On identical rows the Ch.2 model's mean score is 4.6% against an observed 0.13% (36× too high). Any use as a PD level has to go through Ch.7 calibration.
+
+### LGD (Notebook 3)
+
+- **Sample.** 15,464 resolved defaults: 10,099 train, 4,329 OOS and 1,036 OOT. Mean LGD is 0.49 and the distribution is bimodal, with 3.6% at exactly 0 and 7.9% at exactly 1 in training.
+- **The three models tie on OOS RMSE:**
+
+  | Model | OOS RMSE | OOS R² | OOT RMSE | OOT R² |
+  |---|---|---|---|---|
+  | FRM (champion) | 0.234 | 0.385 | 0.288 | 0.284 |
+  | Two-Stage | 0.234 | 0.385 | 0.296 | 0.241 |
+  | Random Forest | 0.240 | 0.354 | 0.302 | 0.213 |
+
+  The FRM degrades least out of time.
+- **Main drivers.** House-price change since origination is the strongest (FRM coefficient +1.83 on the logit scale; 32% of RF importance), followed by original balance and mortgage-insurance coverage. The largest state effects, relative to the AK reference, are NY (+2.02), DC (+1.92), IL, PA and OH (+1.64 each).
+- **Only the two-stage model reproduces the point masses.** FRM and random forest predict a 0% share at both LGD = 0 and LGD = 1. The two-stage model predicts 3.3% and 8.5% against an observed 3.7% and 7.8% (OOS). Its stage-1 classifier still assigns almost every loan to "interior", so it gets the *shares* right without *identifying which* loans hit a boundary.
+
+### Discrete-time hazard (Notebook 5)
+
+- **The PD level is well calibrated in-sample, less so out of time.** Predicted ÷ observed monthly hazard is 1.04 (logit) and 1.02 (XGBoost) on OOS. On OOT it is 1.09 (logit) and 0.69 (XGBoost): XGBoost under-predicts the low-default OOT period by about 30%. On the 12-month snapshot test, logit over-predicts by 27% and XGBoost under-predicts by 20%.
+- **XGBoost ranks better, logit is more conservative.** XGBoost matches the Ch.2 classifier's 12-month AUROC (0.906 vs 0.905) without using delinquency. It also has a Brier score 12× lower, because its probabilities are on the right scale.
+- **Odds ratios per economic step** (logit): +1pp note rate 1.93; +10pp CLTV 1.51; +0.10 HPI ratio (house prices 10% lower than at origination) 1.30; +20 FICO 0.88; two borrowers vs one 0.58; owner-occupied vs investor 0.79. Unemployment adds only 1.03 per percentage point, holding the other covariates fixed.
+- **Proportional hazards is rejected** for all three tested covariates. The LR statistics are `ur_3m_lag` 287, `orig_cltv` 122 and `credit_score` 116, against a 5% critical value of 12.6. The linear model's long-horizon PDs lean on an assumption the data do not support.
+- **Seasoning.** The default hazard rises from zero to a peak around loan age 100–120 months. Both models track the observed hazard and Kaplan–Meier curve closely up to ~180 months. Beyond that the models diverge: the logit spline falls back towards zero after its ~120-month peak, while XGBoost's learned curve stays flat at its peak (trees extrapolate flat).
+- **That tail divergence drives lifetime PD.** For the 210,207 scored OOS loans, mean PIT PDs agree closely up to 60 months (logit 0.70% / 1.48% / 2.32% / 4.05% at 12 / 24 / 36 / 60m; XGBoost within 0.05pp). Mean lifetime PD, however, is 10.3% (logit) against 18.1% (XGBoost). Lifetime PDs from either model should not be used without resolving this.
+- **The TTC PD is below the PIT PD** for the logit model at every horizon (12m: 0.55% vs 0.70%). Scoring on the long-run macro mean (unemployment 6.55%, HPI ratio 0.978) is more benign than the scored loans' actual macro state.
+
+### Competing risks (Notebook 8)
+
+- **The naive conversion overstates PD, and the overstatement grows with horizon.** These PDs are cumulative from origination:
+
+  | Horizon | Naive `1 − S(t)` | CIF (Cox) | CIF (multinomial) | Overstatement |
+  |---|---|---|---|---|
+  | 12m | 0.0073% | 0.0067% | 0.0069% | +9% |
+  | 24m | 0.128% | 0.101% | 0.112% | +27% |
+  | 36m | 0.457% | 0.312% | 0.337% | +47% |
+  | Lifetime (307m) | 12.93% | 2.59% | 2.40% | +399% |
+
+- **A model-free check agrees.** The Aalen–Johansen estimator computed directly on the panel gives the same picture: at 120 months, naive Kaplan–Meier gives 5.42% against an Aalen–Johansen CIF of 2.09% (+159%). Both model specifications track the empirical CIF closely for default and prepayment.
+- **The two specifications agree on direction but not quite on level.** Every covariate effect has the same sign in the Cox and multinomial models. The CIF gap is +3.0% at 12m, +11.8% at 24m, +8.2% at 36m and −7.2% at lifetime, so it is outside the script's ±5% tolerance at 24 and 36 months. The absolute differences are small (0.026pp at 36m).
+- **Covariates act on the two exits differently.** A higher note rate raises both hazards: default HR 1.15 per +1pp, prepayment HR 1.32. Doubling the original balance barely changes default (1.01) but raises prepayment (1.27). Higher FICO lowers default (0.95 per +20 points) but raises prepayment (1.04). Higher CLTV and DTI raise default and slow prepayment.
+- **Expected life is a quarter of the contractual term:** mean 71 months (median 69) against a mean contractual remaining term of 308 months. It is 83 months for the OOT cohort.
+- **What this means for Ch.5b.** The discrete hazard model also censors prepayment, so its multi-year and lifetime PDs are the naive kind. The populations differ (Ch.5b conditions on each loan's current age), but the size of the gap here implies Ch.5b's lifetime PDs are materially overstated for provisioning purposes.
+
+### Issues the run surfaced
+
+- **`refi_incentive` is missing from the competing-risks models.** The PMMS rate file was not found at preprocessing (`macro/pmms_30yr_fixed.csv`), so the dominant prepayment driver was dropped from both specifications. Add the file and re-run `01` and `12`.
+- **Two EDA panels are empty.** Notebook 1's crisis default/90+ DPD time series and its class-imbalance panel rendered their "run preprocessing first" placeholders instead of data.
+- **Notebook 1's preprocessing log is from a different run than the data the models used.** Its PD split sizes (21.4M / 9.2M / 12.3M) and panel end date (2025-09) do not match the `pd_*` files the models loaded (22.6M / 9.7M / 8.7M; OOT panel ending 2021-04). Its per-vintage "mean LGD" values (0.0006–0.043) also contradict the 0.49 in the `lgd_*` files. Regenerate the processed data in one run before quoting data-level statistics side by side with model results.
 
 ---
 
@@ -89,11 +170,12 @@ mortgage-credit-risk/
 | `sample_orig_YYYY.txt` | 32 | Static loan attributes at origination |
 | `sample_svcg_YYYY.txt` | 32 | Monthly servicer updates (UPB, delinquency, disposition) |
 
-Origination years 2000–2020 yield 200M+ loan-month records spanning the 2004–2008 subprime crisis (default rates 3–15% in crisis vintages).
+Origination years 2000–2020 (50,000 sampled loans per vintage) yield ~64M loan-month records spanning the 2004–2008 subprime crisis. About 8–9% of the 2006–2007 vintages eventually defaulted, against under 1% of every vintage from 2009 on.
 
 **Macro data (optional — materially improves discrimination):**
 - FHFA HPI by 3-digit ZIP → `data/raw/macro/hpi_3digit_zip.csv`  ([FHFA](https://www.fhfa.gov/data/hpi))
 - BLS unemployment LNS14000000 → `data/raw/macro/unemployment_rate.csv`  ([BLS](https://data.bls.gov/timeseries/LNS14000000))
+- Freddie Mac PMMS 30-year fixed rate → `pmms_30yr_fixed.csv` in the macro directory  ([PMMS](https://www.freddiemac.com/pmms)). Without it `refi_incentive`, the main prepayment driver, is dropped from the competing-risks models (Ch.10).
 
 ---
 
@@ -220,16 +302,26 @@ WoE encoding with leakage-proof maps (fitted on train only, applied to OOS/OOT):
 WoE_j = ln(p_j / q_j)      IV = Σ_j (p_j − q_j) · WoE_j
 ```
 
+Training-set IVs from the full-dataset run:
+
 | Feature | IV | Strength |
 |---|---|---|
-| `delinquency_indicator` | 0.538 | Very strong |
-| `loan_age` | 0.374 | Strong |
-| `credit_score` | 0.304 | Strong |
-| `orig_dti` | 0.285 | Medium |
-| `orig_interest_rate` | 0.159 | Medium |
-| `orig_cltv` | 0.125 | Medium |
+| `delinquency_indicator` | 2.125 | Very strong |
+| `orig_interest_rate` | 1.314 | Very strong |
+| `hpi_change` | 1.177 | Very strong |
+| `loan_age` | 0.801 | Very strong |
+| `credit_score` | 0.618 | Very strong |
+| `orig_cltv` | 0.530 | Very strong |
+| `ur_3m_lag` | 0.504 | Very strong |
+| `orig_dti` | 0.252 | Medium |
+| `num_borrowers` | 0.129 | Medium |
+| `property_type` | 0.031 | Weak |
+| `orig_upb` | 0.012 | Negligible |
+| `occupancy_status` | 0.007 | Negligible |
 
-`class_weight='balanced'` upweights defaults ~155×. Hosmer–Lemeshow calibration test included.
+An IV above 0.5 normally prompts a leakage check. Here `delinquency_indicator` is a genuine current-state predictor, not leakage (post-default rows are excluded), but it is why the Ch.1/Ch.2 AUROCs are so high.
+
+`class_weight='balanced'` upweights defaults ~172× (the non-default:default ratio in training), so raw scores are not PD levels; Ch.7 calibrates them. Hosmer–Lemeshow calibration test included. Results: OOS AUROC 0.946, KS 0.750, Gini 0.891; OOT AUROC 0.962.
 
 ---
 
@@ -238,14 +330,14 @@ WoE_j = ln(p_j / q_j)      IV = Σ_j (p_j − q_j) · WoE_j
 ```python
 XGBClassifier(
     n_estimators=500, max_depth=6, learning_rate=0.05,
-    scale_pos_weight=155,       # neg/pos ratio for class imbalance
+    scale_pos_weight=172,       # neg/pos ratio for class imbalance (computed at run time)
     tree_method="hist",         # 5–10× RAM reduction via histogram approx.
     device="cuda",              # auto-detected; CPU fallback
     early_stopping_rounds=20,   # halts when OOS AUC plateaus
 )
 ```
 
-GPU acceleration delivers ~15× speedup. XGBoost outperforms LR by capturing non-linear FICO × CLTV × HPI interactions missed by WoE binning.
+GPU acceleration delivers ~15× speedup. On the full dataset XGBoost beats LR only narrowly: OOS AUROC 0.951 vs 0.946, OOT 0.964 vs 0.962. `delinquency_indicator` alone accounts for 79% of its total gain, so there is little left for non-linear interactions to add.
 
 ---
 
@@ -284,7 +376,15 @@ All three are fit with inverse-probability-of-censoring (IPCW) sample weights co
 
 The lowest-RMSE model on OOS (falling back to Train for small samples) is selected as champion and its mean predicted LGD is saved to `lgd_champion_summary.csv` — this is the value Ch.6's macro scenario ECL uses as its LGD anchor, rather than a flat assumption disconnected from this model suite. That file's schema is unchanged by the move to three models.
 
-**Metrics: `TBD — regenerate after running.`** The encoding fix changes every linear model's design matrix, so previously reported LGD figures do not carry over.
+**Metrics** (full-dataset run, 10,099 train / 4,329 OOS / 1,036 OOT resolved defaults):
+
+| Model | OOS RMSE | OOS R² | OOS bias | OOT RMSE | OOT R² |
+|---|---|---|---|---|---|
+| FRM (champion) | 0.234 | 0.385 | +0.010 | 0.288 | 0.284 |
+| Two-Stage | 0.234 | 0.385 | +0.013 | 0.296 | 0.241 |
+| Random Forest | 0.240 | 0.354 | +0.012 | 0.302 | 0.213 |
+
+The FRM is champion, with a mean predicted LGD of 0.503 passed to Ch.6. Only the two-stage model reproduces the boundary shares: it predicts 3.3% at LGD = 0 and 8.5% at LGD = 1, against an observed 3.7% and 7.8% on OOS. FRM and RF predict 0% for both. These figures post-date the encoding fix, so earlier LGD figures should not be quoted.
 
 ---
 
@@ -423,8 +523,8 @@ watching". A prepaid mortgage is not: the lien is released and it can never defa
 the probability of default in a world where prepayment has been *abolished* and prepaid loans stay exposed
 forever. That is a coherent quantity — a net, cause-removed risk — but it is not the one a provision is
 built on, which is the **crude** probability: the chance this loan defaults before anything else happens to
-it. That is the cumulative incidence function, and it is always smaller. In this dataset roughly **10–12
-loans prepay for every one that defaults**, so the gap is not a rounding detail.
+it. That is the cumulative incidence function, and it is always smaller. On the full training panel
+**37 loans prepay for every one that defaults** (87.5% prepay, 2.4% default), so the gap is not a rounding detail.
 
 ```
 S(t)     = exp( −( H_d(t) + H_p(t) ) )            overall survival uses BOTH hazards
@@ -467,8 +567,8 @@ an ordinary covariate.
 **IFRS 9 expected life (§5.5.19).** The per-loan expected life — `Σ_t S(t)`, the area under the
 competing-risks survival curve — is written to `competing_risks_expected_life.csv` and consumed by Ch.6,
 which truncates projected exposure beyond it instead of amortizing over the contractual term. Switchable
-via `config.IFRS9_USE_EXPECTED_LIFE` (`False` reproduces the old behaviour exactly). On the sample data
-expected life is **~49 months against a contractual ~342** — roughly one seventh. Note that the
+via `config.IFRS9_USE_EXPECTED_LIFE` (`False` reproduces the old behaviour exactly). On the full dataset
+expected life is **71 months on average against a contractual 308** — under a quarter. Note that the
 amortization *schedule* still runs on the contractual term: a loan does not pay down faster because it is
 expected to prepay early, it follows its schedule and then disappears.
 
@@ -476,7 +576,10 @@ expected to prepay early, it follows its schedule and then disappears.
 
 | horizon | naive_1_minus_S | cif_cox | cif_multinomial | overstatement_pct |
 |---|---|---|---|---|
-| 12m / 24m / 36m / lifetime | `TBD — regenerate after running` | `TBD` | `TBD` | `TBD` |
+| 12m | 0.0073% | 0.0067% | 0.0069% | +9% |
+| 24m | 0.128% | 0.101% | 0.112% | +27% |
+| 36m | 0.457% | 0.312% | 0.337% | +47% |
+| lifetime (307m) | 12.93% | 2.59% | 2.40% | +399% |
 
 `overstatement_pct = (naive − cif_cox) / cif_cox × 100`, so it reads as "the naive figure is N% larger than
 the correct one". The overstatement compounds with horizon — small at 12 months, large at lifetime — which
@@ -606,23 +709,23 @@ Each model has its own model card under [`docs/model_cards/`](docs/model_cards/R
 
 ## Known Limitations
 
-1. **Prepayment is a competing risk only in Ch.10.** `12_competing_risks.py` treats voluntary prepayment properly, but chapters 1–5b still censor it: the Ch.1/Ch.2 12-month PD models, the Ch.5b discrete hazard and the Ch.5 Cox model all leave a prepaid loan out of the at-risk set without modelling why it left. For a 12-month horizon the distortion is small (the overstatement compounds with horizon), but any *lifetime* quantity taken from those chapters — including Ch.6's Stage 2/3 lifetime ECL PD input — inherits it. Ch.10 measures the size of the error; it does not retrofit the correction upstream.
-2. **Ch.6's "lifetime" horizon is 5 years, not a lifetime.** `config.N_QUARTERS = 20` caps every projection at 20 quarters. Switching Ch.6 from contractual maturity to expected life (~49 vs ~342 months on the sample data) therefore changes ECL by very little, because the 60-month projection window binds long before either. The expected-life correction is implemented, switchable and correct, but it will only move ECL materially if `N_QUARTERS` is raised to a genuine lifetime horizon.
+1. **Prepayment is a competing risk only in Ch.10.** `12_competing_risks.py` treats voluntary prepayment properly, but chapters 1–5b still censor it: the Ch.1/Ch.2 12-month PD models, the Ch.5b discrete hazard and the Ch.5 Cox model all leave a prepaid loan out of the at-risk set without modelling why it left. For a 12-month horizon the distortion is small (the overstatement compounds with horizon), but any *lifetime* quantity taken from those chapters — including Ch.6's Stage 2/3 lifetime ECL PD input — inherits it. Ch.10 measures the size of the error: on the full dataset the naive figure is 27% too high at 24 months, 47% at 36 months and ~5× over the loan's life. It does not retrofit the correction upstream.
+2. **Ch.6's "lifetime" horizon is 5 years, not a lifetime.** `config.N_QUARTERS = 20` caps every projection at 20 quarters. Switching Ch.6 from contractual maturity to expected life (71 vs 308 months on the full dataset) therefore changes ECL by very little, because the 60-month projection window binds long before either. The expected-life correction is implemented, switchable and correct, but it will only move ECL materially if `N_QUARTERS` is raised to a genuine lifetime horizon.
 3. **Expected-life truncation is a hard cutoff, not a survival weighting.** Exposure drops to zero past the expected life. The fully correct treatment weights each quarter's exposure by the probability the loan is still alive, `S(q)`, which needs the per-loan survival *curve* rather than its integral.
-4. **Origination-time covariates are held flat in the CIF projection.** Both competing-risks specifications project each loan's covariates — including `refi_incentive`, the dominant prepayment driver — at their origination values. A genuine refinancing wave is therefore not anticipated, the same flat-projection caveat that applies to the Ch.5b PIT macro path.
+4. **Origination-time covariates are held flat in the CIF projection.** Both competing-risks specifications project each loan's covariates — including `refi_incentive`, the dominant prepayment driver — at their origination values. A genuine refinancing wave is therefore not anticipated, the same flat-projection caveat that applies to the Ch.5b PIT macro path. In the full-dataset run `refi_incentive` was absent altogether, because the PMMS file was missing at preprocessing (see [Data](#data)).
 5. **The `surv_*` OOT split is by origination date, not report date.** `split_pd()` cuts OOT by row, so a loan's months can straddle in-sample and OOT. That is harmless for a snapshot classifier but fatal for a survival model, whose duration is a property of the whole history. `split_survival()` therefore assigns whole loans by origination date. The two splits use the same `OOT_CUTOFF` but are not row-identical, so Ch.10 metrics are not directly comparable to Ch.1–5b metrics on "the same" OOT set. The train/OOS holdout is also drawn **per origination-year cohort** rather than in one pass over the combined panel — this is what lets `01` stream the panel to disk instead of concatenating ~30M loan-months in RAM, and it is safe because a Freddie Mac `sample_svcg_YYYY.txt` holds each loan's complete history, so no loan spans two cohorts. The design (loan-grouped, ~`OOS_FRAC` held out) is unchanged; which specific loans land in OOS differs from a single global draw.
 6. **Sentinel handling at load is global, not field-specific.** `load_orig_year()` applies one `na_values` list (`9`, `99`, `999`, …) to every origination column, but Freddie Mac's sentinels are field-specific (9999 FICO, 999 DTI/LTV/CLTV/MI%, 99 units/borrowers, 9 occupancy/channel/purpose). A legitimate `orig_cltv` or `orig_ltv` of exactly 99 is therefore read as missing. This predates the competing-risks work and is inherited by every chapter including `surv_*`; fixing it would change `pd_*` and so every downstream chapter's output, which is why it has been left as a documented defect rather than changed in passing.
-7. **LGD sample size:** ~150 defaults in the sample dataset. Pre-2010 crisis vintages recommended. This is the binding constraint on Ch.3: it is why the suite was reduced to three models with distinct purposes rather than four flexible mean estimators, why rare categorical levels are pooled into `"other"` before one-hot encoding (`property_state` alone would otherwise contribute ~50 indicators to a ~150-row regression, most identifying a single loan), and why every model carries an explicitly logged small-sample fallback. Check the run log for which fallbacks fired before quoting any LGD metric.
+7. **LGD sample size:** ~150 defaults in the bundled sample dataset (the full dataset has 15,464 resolved defaults, of which 10,099 are in training). Pre-2010 crisis vintages recommended. On the sample data this is the binding constraint on Ch.3: it is why the suite was reduced to three models with distinct purposes rather than four flexible mean estimators, why rare categorical levels are pooled into `"other"` before one-hot encoding (`property_state` alone would otherwise contribute ~50 indicators to a ~150-row regression, most identifying a single loan), and why every model carries an explicitly logged small-sample fallback. Check the run log for which fallbacks fired before quoting any LGD metric.
 8. **12-month window immaturity:** `filter_immature_right_censored()` drops loan-months too close to the dataset's true end to know their 12-month outcome (never-observed-to-default AND within 365 days of the panel's max `report_date`), so a right-censored active loan isn't mislabelled as a confirmed non-default. Rows with a known (even distant) `default_date` keep their label regardless of proximity to the cutoff.
 9. **No hyperparameter tuning:** Cross-validated grid search could improve OOT AUROC by 1–3 points.
 10. **Scenario LGD is population-level, not per-loan:** the macro ECL engine now anchors LGD to Ch.3's champion model output and scales it with scenario HPI (`scenario_lgd()`), rather than a flat 40% assumption — but every loan in a given scenario-quarter still gets the same LGD, since the OOS population scored for PD doesn't carry the LGD-specific features (`hpi_change_since_orig`, `mi_pct`, etc.) needed for true per-loan conditioning. A production system would persist those features alongside the PD population so LGD could vary by loan, not just by scenario and quarter.
 11. **Prior LGD results are invalid under the encoding fix:** before the Ch.3 rewrite, categoricals were label-encoded into integer codes and passed to the Fractional Response Model as continuous covariates — so an FRM coefficient on `property_state` described a single linear slope across alphabetically ordered states. The encoder was also fitted on `concat([train, oos, oot])`, leaking the evaluation splits' level sets into the training encoding. Both are fixed (train-only one-hot with a dropped reference level and rare-level pooling), but any FRM coefficient or metric produced before the fix should be regenerated, not quoted.
-12. **The two-stage LGD model's tail behaviour rests on a constant-precision beta:** stage 2 fits `logit(μ) = Xγ` with a single precision parameter φ shared across all loans, so the *spread* of partial losses is assumed not to vary with loan characteristics even though the *mean* does. `predict_quantile()` inherits that assumption, which matters precisely where it would be used — a downturn LGD read off a high quantile. Modelling φ with its own covariates is the natural extension and is not done here, because at ~150 observations (of which fewer still are interior) there is not enough data to identify it.
+12. **The two-stage LGD model's tail behaviour rests on a constant-precision beta:** stage 2 fits `logit(μ) = Xγ` with a single precision parameter φ shared across all loans, so the *spread* of partial losses is assumed not to vary with loan characteristics even though the *mean* does. `predict_quantile()` inherits that assumption, which matters precisely where it would be used — a downturn LGD read off a high quantile. Modelling φ with its own covariates is the natural extension and is not done here, because at ~150 observations on the sample data (of which fewer still are interior) there is not enough data to identify it. The full dataset's 8,937 interior training rows may be enough to try.
 13. **Ch.5 Cox model is superseded and its metrics are invalid:** `06_survival_analysis.py` collapses the panel to one row per loan and reads time-varying covariates off that last row — the month before default, for a defaulter — so its reported C-index is inflated by construction, and its horizon PDs are measured from origination rather than conditional on the loan's current age. Both are fixed in Ch.5b (`11_discrete_hazard.py`); the Cox script is retained for reference only.
 14. **Discrete hazard: PIT macro projection is flat.** The PIT horizon PD holds each loan's current `ur_3m_lag` / `hpi_change` constant across the whole projection — an explicit "conditions stay as they are today" assumption, not a forecast, since this pipeline contains no macro forecasting model. At long horizons a loan observed in a recession is projected as if the recession never ends (and one at a cyclical peak as if the expansion never does), so 24m–60m PIT PDs are more dispersed across loans than a mean-reverting path would produce. The TTC path is the mean-reverting counterpart, and `compute_conditional_horizon_pd()` accepts an explicit scenario path for anyone who wants one.
 15. **Discrete hazard: internal (delinquency) covariates are excluded.** `delinquency_indicator` and `delinquency_status` are deliberately absent from both hazard models — their future path is an outcome of the default process itself and cannot be projected over a multi-period horizon without a second model of delinquency transitions, and on the row before default they are near-deterministic in the target. The cost is that the models cannot distinguish a current loan from a seriously delinquent one with otherwise identical characteristics; for IFRS 9 that information drives staging instead (Ch.6's 30/90-DPD backstops), not the PD level.
 16. **Discrete hazard: the PD level depends on the sampling correction.** Both models are fitted on a case-control subsample (all events, non-events at rate `r`) and corrected by the King & Zeng logit shift `+log(r)`. The correction is exact under a logit link and is validated against the realised base rate in the metrics (`pred_obs_ratio`), but it does mean the absolute PD level — and therefore every ECL and capital figure derived from it — rests on that correction being right, where discrimination metrics would be unaffected by an error in it. Check `pred_obs_ratio` in `discrete_hazard_*_metrics.csv` before trusting any level-sensitive output.
-17. **Discrete hazard (XGBoost): trees extrapolate flat.** Beyond the oldest `loan_age` or the most extreme macro values seen in training, the boosted model's predicted hazard stops responding — a 300-month projection sees the same hazard as a 60-month one once past the training range, and a macro shock more severe than anything observed is treated as if it were the worst observed. The linear model extrapolates linearly in the logit (with a constant-extrapolated spline baseline). Neither is right; they are wrong differently, which is why both are kept.
+17. **Discrete hazard (XGBoost): trees extrapolate flat.** Beyond the oldest `loan_age` or the most extreme macro values seen in training, the boosted model's predicted hazard stops responding — a 300-month projection sees the same hazard as a 60-month one once past the training range, and a macro shock more severe than anything observed is treated as if it were the worst observed. The linear model extrapolates linearly in the logit (with a constant-extrapolated spline baseline). Neither is right; they are wrong differently, which is why both are kept. On the full dataset this is not academic. The two models' mean PDs agree within 0.05pp out to 60 months, but mean lifetime PD is 10.3% for the logit model and 18.1% for XGBoost. The logit spline's hazard falls after its ~120-month peak, while XGBoost holds its peak hazard flat for the rest of the projection. Lifetime PDs should not be quoted from either model until this is resolved.
 18. **Survival duration (Ch.5, historical):** in the superseded Cox script, duration is `loan_age` at the last retained pre-default observation, plus one reporting period for actual defaulters (since `extract_pd_rows()` drops the default row itself to prevent leakage in the binary target) — the closest recoverable approximation to true time-to-default given that constraint.
 19. **EAD amortization is schedule-only:** `amortized_ead()` projects a standard declining-balance schedule from current UPB/rate/remaining term; it does not model stochastic prepayment beyond that schedule, so realised future balances (and therefore realised EAD) could decline faster than projected.
 20. **LGD IPCW onset trigger is a proxy:** the workout-period truncation correction (`compute_ipcw_weights()`) defines "onset" as first reaching 90+ days past due — a standard regulatory default trigger, but distinct from (and possibly earlier than) the actual start of a formal workout/foreclosure process, which isn't separately recorded in the fields this pipeline reads.
