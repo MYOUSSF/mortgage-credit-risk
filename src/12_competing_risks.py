@@ -899,7 +899,10 @@ def main() -> None:
     # ── [1/6] Load ───────────────────────────────────────────────────────
     log.info("")
     log.info("[1/6] Loading the competing-risks panel …")
-    train_path = OUT_DIR / config.SURV_TRAIN_FILE
+    # surv_* are processed datasets written by 01 to PROC_DIR (like pd_*), not
+    # derived artifacts — on Kaggle PROC_DIR is a read-only input mount and
+    # OUT_DIR a separate writable directory, so the two must not be confused.
+    train_path = PROC_DIR / config.SURV_TRAIN_FILE
     if not train_path.exists():
         log.error("  %s not found. Re-run 01_data_preprocessing.py — it now "
                   "emits the surv_* variant alongside pd_*.", train_path)
