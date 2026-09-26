@@ -868,8 +868,17 @@ def attach_refi_incentive(df: pd.DataFrame,
 
     PMMS is weekly and reporting periods are monthly, so the join is a
     backward merge_asof: each loan-month takes the most recent survey on or
-    before its reporting date. No PMMS file -> both columns are NaN and the
-    caller logs that the feature is unavailable.
+    before its reporting date (within 31 days). No PMMS file -> both columns
+    are NaN and the caller logs that the feature is unavailable.
+
+    Row alignment
+    -------------
+    merge_asof needs both sides sorted on the key, but the survival panel is
+    ordered by loan then month. Each row's original position is carried
+    through the merge in `_pos` and the rates are written back to those
+    positions, so every loan-month receives the survey rate for its own
+    date. (Assigning the date-sorted merge result straight back by position
+    would scramble pmms_rate across rows.)
     """
     out = df.copy()
     if pmms is None or "report_date" not in out.columns:
@@ -877,13 +886,34 @@ def attach_refi_incentive(df: pd.DataFrame,
         out["refi_incentive"] = np.nan
         return out
 
+    left = pd.DataFrame({
+        "report_date": pd.to_datetime(out["report_date"]).to_numpy().astype("datetime64[ns]"),
+        "_pos":        np.arange(len(out)),
+    })
+    right = (
+        pmms[["date", "pmms_rate"]]
+        .dropna()
+        .rename(columns={"date": "report_date"})
+        .assign(report_date=lambda d: pd.to_datetime(d["report_date"])
+                                        .to_numpy().astype("datetime64[ns]"))
+        .drop_duplicates(subset=["report_date"], keep="last")
+        .sort_values("report_date")
+    )
+
+    # merge_asof cannot take null keys: merge only rows with a valid date;
+    # rows with a missing report_date keep NaN.
+    valid = left["report_date"].notna()
     joined = pd.merge_asof(
-        out[["report_date"]].sort_values("report_date"),
-        pmms.rename(columns={"date": "report_date"}),
-        on="report_date", direction="backward",
+        left[valid].sort_values("report_date"),
+        right,
+        on="report_date",
+        direction="backward",
         tolerance=pd.Timedelta(days=31),
     )
-    out["pmms_rate"] = joined["pmms_rate"].to_numpy()
+
+    rates = np.full(len(out), np.nan)
+    rates[joined["_pos"].to_numpy()] = joined["pmms_rate"].to_numpy()
+    out["pmms_rate"] = rates
 
     if "orig_interest_rate" in out.columns:
         out["refi_incentive"] = out["orig_interest_rate"] - out["pmms_rate"]
