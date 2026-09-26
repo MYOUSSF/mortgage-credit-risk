@@ -248,17 +248,64 @@ def _parse_period(series: pd.Series, col_name: str = "date",
 # FILE LOADING
 # =============================================================================
 
+def _first_line(path: Path) -> str:
+    with open(path, encoding="latin-1") as fh:
+        return fh.readline().rstrip("\r\n")
+
+
 def _read_csv_pipe(path: Path, names: list[str], usecols: list[int] | None = None,
                    na_values: list[str] | None = None) -> pd.DataFrame:
-    """Shared CSV reader for Freddie Mac's pipe-delimited latin-1 files."""
+    """
+    Shared CSV reader for Freddie Mac's pipe-delimited latin-1 files.
+
+    Tolerant of the record layout drifting between dataset releases, because
+    the field count is not fixed: Freddie Mac appends new fields to the END
+    of the record in later releases (positions of existing fields do not
+    move), older releases have fewer trailing fields, and some exports end
+    each line with a trailing '|' that reads as one extra empty field. Any of
+    these makes pd.read_csv(names=...) fail with "Number of passed names did
+    not match number of header fields". So the actual field count is read
+    from the first line and the known names are mapped onto it by position:
+
+      * more fields than `names` → the extras are named _extra_<i> and ignored
+      * fewer fields             → the missing trailing columns are added as NaN
+                                   (an error only if a column in `usecols` is
+                                   one of them)
+
+    A header row (a first line with no digits at all — every data record
+    carries a numeric date field) is skipped.
+    """
+    first = _first_line(path)
+    has_header = not any(ch.isdigit() for ch in first)
+    n_fields = first.count("|") + 1
+
+    if n_fields != len(names):
+        log.warning("  %s has %d fields per record; the layout in this script "
+                    "has %d — mapping known columns by position.",
+                    path.name, n_fields, len(names))
+    file_names = list(names[:n_fields]) + [f"_extra_{i}" for i in range(len(names), n_fields)]
+    missing_trailing = list(names[n_fields:])
+
     kwargs: dict = dict(
-        sep="|", header=None, names=names,
+        sep="|", header=None, names=file_names, skiprows=1 if has_header else 0,
         dtype=str, encoding="latin-1", low_memory=False,
         na_values=na_values or ["", " "],
     )
     if usecols is not None:
+        needed_missing = [names[i] for i in usecols if i >= n_fields]
+        if needed_missing:
+            raise ValueError(
+                f"{path.name} has only {n_fields} fields per record, so required "
+                f"column(s) {needed_missing} are absent. First line: {first[:200]!r}"
+            )
         kwargs["usecols"] = usecols
-    return pd.read_csv(path, **kwargs)
+    df = pd.read_csv(path, **kwargs)
+
+    if usecols is None:
+        df = df.drop(columns=[c for c in df.columns if c.startswith("_extra_")])
+        for col in missing_trailing:
+            df[col] = pd.NA
+    return df
 
 
 def load_orig_year(year: int) -> pd.DataFrame:
