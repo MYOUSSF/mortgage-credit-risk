@@ -10,6 +10,11 @@ Credit Risk Modelling implemented on the Freddie Mac Single-Family Loan Performa
 
 All figures below come from the full-dataset run on Kaggle (notebooks 1, 2, 3, 5 and 8), not from the bundled sample data. The OOS set is a random 30% holdout; the OOT set is a later period never seen in training, with a much lower default rate (0.12% of loan-months vs 0.58% in training).
 
+> **These results predate the switch to the Basel 90+ DPD default definition** ([Default definition](#data-engineering-script-01)); they were produced under the older liquidation-only definition and need a re-run. Expect three shifts:
+> - **Default rates rise and move earlier.** Loans now count at 90 DPD rather than at liquidation, including those later modified or cured.
+> - **The Ch.1/Ch.2 AUROCs will probably fall.** Loan-months already 90+ DPD but not yet liquidated were in the old panel labelled as imminent defaults, which is trivially easy to predict. They are now excluded as already-defaulted.
+> - **Mean LGD falls.** Cures now enter the LGD sample at LGD 0.
+
 **12-month PD classifiers** (Ch.1, Ch.2): current delinquency is an input
 
 | Model | AUROC OOS | KS OOS | Gini OOS | AUROC OOT | Gini OOT |
@@ -41,7 +46,7 @@ The 12-month rows are scored on the same 506,733 OOT loan-months at three snapsh
 
 ## Findings
 
-What the full-dataset run shows, notebook by notebook. Figures are from the saved notebook outputs.
+What the full-dataset run shows, notebook by notebook. Figures are from the saved notebook outputs, produced under the **old liquidation-only default definition** (see the note under Key Results).
 
 ### Data (Notebook 1)
 
@@ -225,7 +230,7 @@ python 10_basel_irb_capital.py        # Rating master scale + Basel IRB RWA/capi
 
 ### Configuration
 
-Every script imports `config.py` for values that must stay identical across the pipeline: the random seed, the train/OOS/OOT split boundary, the default-event codes, the PD/LGD feature lists, GPU detection, the plot theme, the shared logging setup, PSI/IV rating thresholds, and the IFRS 9 macro scenario assumptions. Each script keeps its own local name for what it imports (e.g. `TARGET = config.TARGET_PD`), so change an assumption once in `config.py` and every script that depends on it picks it up — there's no second or third copy of `DEFAULT_CODES` or the macro scenario shocks to remember to update.
+Every script imports `config.py` for values that must stay identical across the pipeline: the random seed, the train/OOS/OOT split boundary, the default definition (`DEFAULT_DPD_MONTHS`, `DEFAULT_CODES`), the PD/LGD feature lists, GPU detection, the plot theme, the shared logging setup, PSI/IV rating thresholds, and the IFRS 9 macro scenario assumptions. Each script keeps its own local name for what it imports (e.g. `TARGET = config.TARGET_PD`), so change an assumption once in `config.py` and every script that depends on it picks it up — there's no second or third copy of `DEFAULT_CODES` or the macro scenario shocks to remember to update.
 
 ### Running on Kaggle (or any chained-notebook setup)
 
@@ -273,7 +278,16 @@ for year in range(2000, 2021):
 pd_all = pd.concat([pd.read_parquet(f) for f in chunk_files])
 ```
 
-**Default definition:** `zero_balance_code ∈ {02, 03, 06, 09, 15}` — 3rd-party sale, short sale, repurchase, REO, note sale. Prepayments (01) explicitly excluded; the rare non-standard codes 16 (reperforming) and 96 (non-standard disposition) are not treated as default events.
+**Default definition (Basel, CRR Art. 178).** A loan defaults in the first month it is **90+ days past due**, or shows an unlikeliness-to-pay event before that: REO acquisition (delinquency status `RA`), or a credit-related disposition (`zero_balance_code ∈ {02, 03, 06, 09, 15}`: 3rd-party sale, short sale, repurchase, REO, note sale). Prepayments (01) and the non-loss codes 16 (reperforming sale) and 96 (non-standard disposition) are never defaults. Default is absorbing for PD: the loan leaves the PD and survival panels at its first default.
+
+**LGD is estimated on the same default definition.** Each defaulted loan is followed to its resolution:
+- **Liquidated** (a credit disposition, even after an earlier cure): realised `actual_loss / removal UPB`.
+- **Cured** (3 consecutive months current, the EBA probation minimum) or **paid off** after default: LGD 0.
+- **Still in workout** at the end of the data: excluded, with the IPCW weights correcting the resulting truncation.
+
+LGD covariates are taken from the default month, not the resolution month.
+
+`config.DEFAULT_DPD_MONTHS = None` restores the older **liquidation-only** definition, in which only a disposition code counts. That definition lags the borrower's actual default by the 1–3+ year foreclosure timeline, never counts modified or cured loans, and leaves recent vintages heavily right-censored. `config.LGD_INCLUDE_CURES = False` restricts LGD to liquidations.
 
 **Train / OOS / OOT split:**
 
@@ -723,6 +737,10 @@ Each model has its own model card under [`docs/model_cards/`](docs/model_cards/R
 21. **PD-at-origination proxy for SICR:** `07_macro_scenario_analysis.py`'s `compute_origination_pd()` approximates each loan's PD at initial recognition by re-scoring with `loan_age` forced to 0, holding every other feature (including current macro state) fixed — not the loan's actual historical origination-time PD, which this pipeline doesn't persist per loan. A production system would snapshot and store the underwriting-time score itself.
 22. **Rating master scale bounds are illustrative:** `config.RATING_SCALE`'s PD upper bounds are standard S&P/Moody's-style anchor points, not calibrated to this portfolio's realised default experience — an institution would fit its own master scale before using it for disclosure or limit-setting.
 23. **Basel capital LGD is not downturn-adjusted:** `10_basel_irb_capital.py` uses the same population-level, average-conditions LGD anchor as Ch.6's ECL engine (limitation #10). Basel IRB capital formally requires a downturn LGD — the LGD expected under adverse economic conditions — which is typically higher and would increase the computed capital requirement.
+
+24. **Ch.6 Stage 3 is empty under the 90+ DPD definition.** The PD panel now stops at each loan's default, so it contains no loan-month that is 90+ DPD, and `assign_ifrs9_stage()`'s 90-DPD backstop never fires. Credit-impaired (Stage 3) exposures, whose PD is 1, would have to be scored separately from the defaulted loans; Ch.6 does not do that yet, so its ECL covers performing (Stage 1/2) loans only.
+25. **One default episode per loan.** Default is absorbing for PD, so a loan that cures and later re-defaults contributes one PD event. For LGD, a later liquidation is attributed to the first default episode (the realised loss takes priority over the earlier cure). Losses are therefore counted once, but the PD models never see second defaults.
+26. **Cured LGD is set to 0.** A cure by loan modification can carry an economic loss (rate or principal concessions, recorded in the servicing file's modification-cost fields). Those costs are not included, so the LGD of modified cures is understated. The EBA also expects cure LGDs to include indirect costs, which this data does not record.
 
 ---
 

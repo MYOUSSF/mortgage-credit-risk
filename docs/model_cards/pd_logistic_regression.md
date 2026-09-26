@@ -26,7 +26,7 @@ WoE encoding (15 quantile bins for continuous features, raw categories for `occu
 ## 4. Development Data
 
 - **Population:** Freddie Mac Single-Family Loan-Level Dataset, origination years 2000–2020
-- **Target:** `default_12m` — `zero_balance_code ∈ {02, 03, 06, 09, 15}` (3rd-party sale, short sale, repurchase, REO, note sale) within a 12-month forward window; prepayments (01) and non-loss codes (16, 96) excluded. See `config.DEFAULT_CODES`.
+- **Target:** `default_12m` — default within a 12-month forward window, under the Basel definition: the first month the loan is 90+ days past due, reaches REO acquisition, or has a credit-related disposition (`zero_balance_code ∈ {02, 03, 06, 09, 15}`). Prepayments (01) and non-loss codes (16, 96) are not defaults. Loan-months already in default are excluded. See `config.DEFAULT_DPD_MONTHS` / `config.DEFAULT_CODES`.
 - **Split:** Train 2000–2017 (70% of in-sample), OOS random 30% of in-sample, OOT 2017–2024 (temporal, never seen during fitting) — see `config.OOT_CUTOFF` / `config.OOS_FRAC`
 - **Features:** `config.PD_FEATURES` (12 features — delinquency status, HPI change, credit score, CLTV, DTI, loan age, unemployment lag, etc.)
 

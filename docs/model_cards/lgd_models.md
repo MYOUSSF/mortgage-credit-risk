@@ -62,8 +62,8 @@ Full derivation in the [README's Ch.3 section](../../README.md#ch3--lgd-models).
 
 ## 4. Development Data
 
-- **Population:** defaulted loans only (`zero_balance_code ∈ config.DEFAULT_CODES`) — one row per loan, the final servicer observation at resolution
-- **Target:** `lgd = actual_loss / zero_balance_removal_upb`, clipped to [0, 1]
+- **Population:** every **resolved** default under the Basel 90+ DPD definition (`config.DEFAULT_DPD_MONTHS`), one row per loan, with covariates from the default month. Resolutions: liquidation, cure (3 consecutive months current, `config.CURE_PROBATION_MONTHS`) or payoff. Defaults still in workout at the end of the data are excluded and corrected for by the IPCW weights. `config.LGD_INCLUDE_CURES = False` keeps liquidations only.
+- **Target:** `lgd = actual_loss / zero_balance_removal_upb`, clipped to [0, 1], for a liquidation; 0 for a cure or payoff. The `resolution` column records which. Cures add a large point mass at LGD = 0, which the two-stage model represents explicitly and the mean-only models do not.
 - **Sample size:** approximately 150 defaults in the sample dataset — small enough to materially affect all three models' variance; pre-2010 crisis vintages are recommended to increase the usable default count
 - **Features:** `config.LGD_FEATURES` (17 features — HPI change since origination, mortgage insurance %, CLTV, DTI, current interest rate, property/loan characteristics)
 - **Split:** same train/OOS/OOT structure as the PD models (`config.OOT_CUTOFF`, `config.OOS_FRAC`), applied to the defaulted-loan population

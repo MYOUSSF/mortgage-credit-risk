@@ -365,3 +365,100 @@ def test_psi_flags_a_population_entirely_outside_the_reference_range(preprocessi
     test = pd.Series(rng.normal(20, 1, 2000))  # zero overlap with ref's range
     psi = preprocessing._compute_psi(ref, test)
     assert psi > 0.25
+
+
+# ── Basel default definition: 90+ DPD, REO, credit disposition ────────────────
+
+def _history(loan, statuses, terminal_code=None, loss=None, start="2012-01-01"):
+    """One loan's monthly rows: `statuses` are raw delinquency strings
+    ("0", "3", "RA", ...); `terminal_code` sits on the last row."""
+    dates = pd.date_range(start, periods=len(statuses), freq="MS")
+    rows = []
+    for i, (st, d) in enumerate(zip(statuses, dates)):
+        last = i == len(statuses) - 1
+        rows.append({
+            "loan_seq_num": loan, "report_date": d,
+            "orig_date": pd.Timestamp(start) - pd.DateOffset(months=1),
+            "delinquency_status_raw": st,
+            "delinquency_status": pd.to_numeric(st, errors="coerce"),
+            "zero_balance_code": terminal_code if (last and terminal_code) else np.nan,
+            "zero_balance_date": d if (last and terminal_code) else pd.NaT,
+            "actual_loss": loss if (last and loss is not None) else np.nan,
+            "zero_balance_removal_upb": 200_000.0 if (last and terminal_code) else np.nan,
+            "current_upb": 200_000.0, "loan_age": i + 1, "orig_interest_rate": 5.0,
+        })
+    return rows
+
+
+def test_default_definition_is_basel_90_dpd(preprocessing):
+    assert preprocessing.config.DEFAULT_DPD_MONTHS == 3
+    assert preprocessing.config.CURE_PROBATION_MONTHS == 3
+
+
+def test_default_date_is_first_90_dpd_month_not_liquidation(preprocessing):
+    # 30 and 60 DPD are not default; 90 DPD is, two months before liquidation.
+    df = pd.DataFrame(_history("L1", ["0", "1", "2", "3", "4", "5"], "09", 50_000))
+    out = preprocessing.extract_pd_rows(df)
+    assert out["default_date"].iloc[0] == pd.Timestamp("2012-04-01")
+    # No loan-month already in default survives in the PD panel.
+    assert out["report_date"].max() == pd.Timestamp("2012-03-01")
+
+
+def test_credit_disposition_before_90_dpd_is_a_default(preprocessing):
+    df = pd.DataFrame(_history("L1", ["0", "2", "2"], "03", 20_000))  # short sale at 60 DPD
+    assert preprocessing.extract_pd_rows(df)["default_date"].iloc[0] == pd.Timestamp("2012-03-01")
+
+
+def test_reo_acquisition_status_is_a_default(preprocessing):
+    df = pd.DataFrame(_history("L1", ["0", "2", "RA", "RA"]))
+    assert preprocessing.extract_pd_rows(df)["default_date"].iloc[0] == pd.Timestamp("2012-03-01")
+
+
+def test_cured_default_still_terminates_the_survival_history(preprocessing):
+    df = pd.DataFrame(_history("L1", ["0", "3", "0", "0", "0", "0"]))
+    out = preprocessing.extract_survival_rows(df)
+    assert out["event_type"].iloc[0] == 1          # default, not censored
+    assert out["duration_months"].iloc[0] == 2     # at the 90 DPD month
+
+
+def test_lgd_cure_is_zero_and_liquidation_is_realised_loss(preprocessing):
+    df = pd.DataFrame(
+        _history("CURE", ["0", "3", "0", "0", "0", "0"])
+        + _history("LIQ", ["0", "1", "2", "3", "4", "5"], "09", 50_000)
+    )
+    out = preprocessing.extract_lgd_rows(df).set_index("loan_seq_num")
+    assert out.loc["CURE", "resolution"] == "cured"
+    assert out.loc["CURE", "lgd"] == 0.0
+    assert out.loc["LIQ", "resolution"] == "liquidated"
+    assert out.loc["LIQ", "lgd"] == pytest.approx(0.25)
+    # Covariates come from the default month, not the liquidation month.
+    assert out.loc["LIQ", "loan_age"] == 4
+
+
+def test_lgd_liquidation_takes_priority_over_an_earlier_cure(preprocessing):
+    # Cured after the first default, re-defaulted, then liquidated: one
+    # default episode carrying the realised loss.
+    df = pd.DataFrame(_history("L1", ["0", "3", "0", "0", "0", "3", "4"], "09", 80_000))
+    out = preprocessing.extract_lgd_rows(df)
+    assert out["resolution"].item() == "liquidated"
+    assert out["lgd"].item() == pytest.approx(0.40)
+
+
+def test_other_exit_is_neither_an_lgd_row_nor_open_for_ipcw(preprocessing):
+    df = pd.DataFrame(_history("L1", ["0", "3", "1"], "16"))   # reperforming sale
+    assert preprocessing.extract_lgd_rows(df).empty
+    assert preprocessing.extract_lgd_onset_rows(df).empty
+
+
+def test_liquidation_only_mode_reproduces_the_old_definition(preprocessing, monkeypatch):
+    monkeypatch.setattr(preprocessing.config, "DEFAULT_DPD_MONTHS", None)
+    df = pd.DataFrame(
+        _history("CURE", ["0", "3", "0", "0", "0", "0"])
+        + _history("LIQ", ["0", "1", "2", "3", "4", "5"], "09", 50_000)
+    )
+    pd_rows = preprocessing.extract_pd_rows(df)
+    assert pd_rows.loc[pd_rows["loan_seq_num"] == "CURE", "default_date"].isna().all()
+    assert pd_rows.loc[pd_rows["loan_seq_num"] == "LIQ", "default_date"].iloc[0] \
+        == pd.Timestamp("2012-06-01")
+    lgd = preprocessing.extract_lgd_rows(df)
+    assert lgd["loan_seq_num"].tolist() == ["LIQ"]

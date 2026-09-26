@@ -738,6 +738,27 @@ def engineer_features(merged: pd.DataFrame,
 # PD TARGET CONSTRUCTION  (thesis §1.5.2)
 # =============================================================================
 
+def default_event_rows(df: pd.DataFrame) -> pd.Series:
+    """
+    Boolean mask of loan-month rows that are in default (config's Basel
+    definition): 90+ days past due, REO acquisition, or a credit-related
+    zero-balance disposition. A loan's default date is its first such row.
+
+    With config.DEFAULT_DPD_MONTHS = None only the disposition codes count
+    (the older liquidation-only definition). Frames without delinquency
+    columns (e.g. minimal test fixtures) fall back to the codes alone.
+    """
+    mask = df["zero_balance_code"].isin(DEFAULT_CODES)
+    if config.DEFAULT_DPD_MONTHS is not None:
+        if "delinquency_status" in df.columns:
+            dpd = pd.to_numeric(df["delinquency_status"], errors="coerce")
+            mask |= dpd >= config.DEFAULT_DPD_MONTHS
+        if "delinquency_status_raw" in df.columns:
+            raw = df["delinquency_status_raw"].astype(str).str.strip().str.upper()
+            mask |= raw.isin({"R", "RA"})
+    return mask.fillna(False).astype(bool)
+
+
 def extract_pd_rows(df: pd.DataFrame) -> pd.DataFrame:
     """
     Build the 12-month forward default indicator.
@@ -746,10 +767,15 @@ def extract_pd_rows(df: pd.DataFrame) -> pd.DataFrame:
         default_12m = 1  if  0 < days_to_default ≤ 365
                     = 0  otherwise
 
-    Rows at or after the default event are dropped to prevent data leakage.
+    where the default date is the loan's first default_event_rows() month
+    (90+ DPD / REO / credit disposition under the Basel definition).
+
+    Rows at or after the default event are dropped to prevent data leakage —
+    so under the 90+ DPD definition the panel holds no loan-month that is
+    already in default.
     """
     df = df.copy()
-    df["is_default"] = df["zero_balance_code"].isin(DEFAULT_CODES)
+    df["is_default"] = default_event_rows(df)
 
     # Earliest default date per loan
     default_dates = (
@@ -1037,7 +1063,10 @@ def extract_survival_rows(df: pd.DataFrame,
         return pd.DataFrame()
 
     # ── Terminal events, by cause ────────────────────────────────────────
-    out["is_default_row"] = out["zero_balance_code"].isin(DEFAULT_CODES)
+    # Default under config's definition (first 90+ DPD / REO / credit
+    # disposition month); a loan that defaults and later cures or prepays
+    # still terminates at its default, since that comes first.
+    out["is_default_row"] = default_event_rows(out)
     out["is_prepay_row"]  = out["zero_balance_code"].isin(PREPAY_CODES)
 
     def _first_date(mask: pd.Series, name: str) -> pd.DataFrame:
@@ -1068,10 +1097,14 @@ def extract_survival_rows(df: pd.DataFrame,
             loans[col] = pd.NaT
         loans[col] = pd.to_datetime(loans[col])
 
-    # Whichever cause fires first terminates the loan. A loan carrying both
-    # codes is a data error, but taking the earlier of the two is the
-    # defensible resolution rather than letting it contribute twice.
-    both = loans["default_date"].notna() & loans["prepay_date"].notna()
+    # Whichever cause fires first terminates the loan. Under the 90+ DPD
+    # definition "defaulted, then cured, then prepaid" is an ordinary history
+    # (default comes first and terminates the loan). A loan carrying both a
+    # credit-DISPOSITION code and a prepayment code is a data error, but
+    # taking the earlier of the two is the defensible resolution rather than
+    # letting it contribute twice.
+    disposed = out.loc[out["zero_balance_code"].isin(DEFAULT_CODES), "loan_seq_num"].unique()
+    both = (loans["loan_seq_num"].isin(disposed) & loans["prepay_date"].notna())
     if both.any():
         log.warning("  %s loan(s) carry BOTH a default and a prepayment code — "
                     "using whichever occurred first.", f"{int(both.sum()):,}")
@@ -1292,7 +1325,173 @@ def split_survival(df: pd.DataFrame,
 # LGD TARGET CONSTRUCTION  (thesis §3.3)
 # =============================================================================
 
+RESOLVED_LGD = ("liquidated", "cured", "prepaid")
+_EPISODE_COLS = ["loan_seq_num", "default_date", "resolution", "resolution_date",
+                 "liquidation_date"]
+
+
+def lgd_default_episodes(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Follow every defaulted loan from its default to its resolution.
+
+    One row per loan with a default_event_rows() month. `resolution` is, in
+    priority order:
+
+      liquidated  a credit-related disposition (DEFAULT_CODES) at or after
+                  default — the realised loss is known. Takes priority over a
+                  cure, so a loan that cures, re-defaults and is later
+                  liquidated carries that loss (one default episode per loan,
+                  consistent with the absorbing PD definition).
+      cured       config.CURE_PROBATION_MONTHS consecutive months reported
+                  current (0 DPD, no zero-balance code) after default
+      prepaid     paid off in full (PREPAY_CODES) after default, without a
+                  completed cure
+      other_exit  left the data by another code (16 reperforming sale, 96
+                  non-standard) — no observable loss, so not an LGD row
+      open        none of the above by the end of the data: still in workout
+
+    With config.LGD_INCLUDE_CURES = False, cures and payoffs are not
+    resolutions: a loan that has cured is "open", one that paid off is
+    "other_exit", and only liquidations are resolved.
+    """
+    cols = ["loan_seq_num", "report_date", "zero_balance_code"] + [
+        c for c in ("delinquency_status", "delinquency_status_raw") if c in df.columns]
+    d = df[cols].copy()
+    is_def = default_event_rows(d)
+    if not is_def.any():
+        return pd.DataFrame(columns=_EPISODE_COLS)
+
+    default_date = (d.loc[is_def].groupby("loan_seq_num")["report_date"].min()
+                    .rename("default_date"))
+    post = d.merge(default_date.reset_index(), on="loan_seq_num", how="inner")
+    post = post[post["report_date"] >= post["default_date"]]
+    zbc = post["zero_balance_code"]
+
+    def _first(frame: pd.DataFrame, mask: pd.Series, name: str) -> pd.Series:
+        return frame.loc[mask].groupby("loan_seq_num")["report_date"].min().rename(name)
+
+    known = DEFAULT_CODES | PREPAY_CODES
+    parts = [
+        _first(post, zbc.isin(DEFAULT_CODES), "liquidation_date"),
+        _first(post, zbc.isin(PREPAY_CODES), "prepay_date"),
+        _first(post, zbc.notna() & ~zbc.isin(known), "other_exit_date"),
+    ]
+
+    # Cure: a run of CURE_PROBATION_MONTHS consecutive current rows after the
+    # default month. The run counter resets at every non-current row and at
+    # each new loan.
+    if "delinquency_status" in post.columns:
+        after = post[post["report_date"] > post["default_date"]].sort_values(
+            ["loan_seq_num", "report_date"])
+        current = ((pd.to_numeric(after["delinquency_status"], errors="coerce") == 0)
+                   & after["zero_balance_code"].isna())
+        new_loan = after["loan_seq_num"].ne(after["loan_seq_num"].shift())
+        run_id = ((~current) | new_loan).cumsum()
+        run_len = current.astype(int).groupby(run_id).cumsum()
+        parts.append(_first(after, run_len >= config.CURE_PROBATION_MONTHS, "cure_date"))
+    else:
+        parts.append(pd.Series(dtype="datetime64[ns]", name="cure_date"))
+
+    ep = default_date.to_frame().join(parts, how="left").reset_index()
+    for col in ("liquidation_date", "prepay_date", "other_exit_date", "cure_date"):
+        ep[col] = pd.to_datetime(ep[col])
+
+    liq, cure = ep["liquidation_date"].notna(), ep["cure_date"].notna()
+    paid, other = ep["prepay_date"].notna(), ep["other_exit_date"].notna()
+    if config.LGD_INCLUDE_CURES:
+        conditions = [liq, cure, paid, other]
+        labels     = ["liquidated", "cured", "prepaid", "other_exit"]
+    else:
+        conditions = [liq, paid | other]
+        labels     = ["liquidated", "other_exit"]
+    ep["resolution"] = np.select(conditions, labels, default="open")
+    ep["resolution_date"] = pd.to_datetime(np.select(
+        [ep["resolution"] == "liquidated", ep["resolution"] == "cured",
+         ep["resolution"] == "prepaid"],
+        [ep["liquidation_date"], ep["cure_date"], ep["prepay_date"]],
+        default=pd.NaT))
+    return ep[_EPISODE_COLS]
+
+
 def extract_lgd_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Build the LGD target, one row per resolved default.
+
+    Under the 90+ DPD definition (config.DEFAULT_DPD_MONTHS set):
+      * the population is every default resolved by lgd_default_episodes():
+        liquidations, plus cures and payoffs when config.LGD_INCLUDE_CURES;
+      * LGD = actual_loss / zero_balance_removal_upb, clipped to [0, 1], for
+        a liquidation, and 0 for a cure or payoff;
+      * covariates are taken from the DEFAULT month — what is known when the
+        LGD is estimated — not from the resolution month, whose house-price
+        and rate values postdate the default;
+      * zero_balance_date is set to the resolution date, so split_lgd() cuts
+        on when the outcome became known, as before.
+
+    With config.DEFAULT_DPD_MONTHS = None the older liquidation-only target
+    is produced unchanged (_extract_lgd_rows_liquidation_only).
+    """
+    if config.DEFAULT_DPD_MONTHS is None:
+        return _extract_lgd_rows_liquidation_only(df)
+
+    ep = lgd_default_episodes(df)
+    wanted = RESOLVED_LGD if config.LGD_INCLUDE_CURES else ("liquidated",)
+    ep = ep[ep["resolution"].isin(wanted)]
+    if ep.empty:
+        return pd.DataFrame()
+
+    # Covariates as at the default month.
+    at_default = df.merge(ep, left_on=["loan_seq_num", "report_date"],
+                          right_on=["loan_seq_num", "default_date"], how="inner")
+    at_default = at_default.drop_duplicates("loan_seq_num").reset_index(drop=True)
+
+    # Realised loss, from each liquidated loan's final disposition row.
+    loss_rows = (df[df["zero_balance_code"].isin(DEFAULT_CODES)]
+                 .sort_values("report_date").groupby("loan_seq_num").last())
+    liquidated = at_default["resolution"] == "liquidated"
+    ids = at_default["loan_seq_num"]
+
+    def _from_loss(col: str) -> pd.Series:
+        if col not in loss_rows.columns:
+            return pd.Series(np.nan, index=at_default.index)
+        return pd.to_numeric(ids.map(loss_rows[col]), errors="coerce")
+
+    upb_at_default = (pd.to_numeric(at_default["current_upb"], errors="coerce")
+                      if "current_upb" in at_default.columns
+                      else pd.Series(np.nan, index=at_default.index))
+    upb = _from_loss("zero_balance_removal_upb").fillna(upb_at_default)
+    # In this dataset actual_loss is POSITIVE for a loss. The sign was once
+    # flipped on the assumption that losses are reported as negatives, and
+    # every vintage's mean LGD collapsed to 0.001-0.04 (2007 REOs included),
+    # because the negated losses were then clipped to 0. Missing losses stay
+    # NaN (dropped below) rather than being treated as zero.
+    loss = _from_loss("actual_loss")
+    with np.errstate(divide="ignore", invalid="ignore"):
+        liq_ratio = np.where(upb > 0, loss / upb, np.nan)
+
+    at_default["lgd_raw"] = np.where(liquidated, liq_ratio, 0.0)
+    at_default["lgd"]     = np.clip(at_default["lgd_raw"], 0, 1)
+
+    zb_liq = ids.map(loss_rows["zero_balance_date"]) if "zero_balance_date" in loss_rows else pd.NaT
+    zb = pd.Series(pd.to_datetime(np.where(liquidated, pd.to_datetime(zb_liq), pd.NaT)),
+                   index=at_default.index)
+    at_default["zero_balance_date"] = zb.fillna(at_default["resolution_date"])
+
+    out = at_default.dropna(subset=["lgd"])
+    # Sign guard, on liquidations only (cures are legitimately LGD 0):
+    # liquidated mortgage defaults almost never lose nothing, so a majority at
+    # LGD = 0 means the loss sign convention is wrong for this data release
+    # (or actual_loss is misaligned), not a real recovery rate.
+    liq_out = out[out["resolution"] == "liquidated"]
+    if len(liq_out) >= 20 and (liq_out["lgd"] == 0).mean() > 0.5:
+        log.warning("  %.0f%% of liquidated defaults have LGD = 0 (%.0f%% of raw "
+                    "ratios are negative) — check the actual_loss sign "
+                    "convention before using the LGD data.",
+                    100 * (liq_out["lgd"] == 0).mean(), 100 * (liq_out["lgd_raw"] < 0).mean())
+    return out
+
+
+def _extract_lgd_rows_liquidation_only(df: pd.DataFrame) -> pd.DataFrame:
     """
     Build the LGD target: actual_loss / zero_balance_removal_upb, clipped [0, 1].
 
@@ -1343,6 +1542,38 @@ def extract_lgd_rows(df: pd.DataFrame) -> pd.DataFrame:
 # =============================================================================
 
 def extract_lgd_onset_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    One row per defaulted loan, recording when it entered workout (its
+    default month) and whether / when it resolved — the input to
+    compute_ipcw_weights().
+
+    extract_lgd_rows() correctly keeps only *resolved* defaults (no
+    leakage), but that resolved-case sample is truncated: a loan that
+    defaulted close to the dataset's end and takes a long time to resolve
+    (contested foreclosure, REO) is systematically missing, while one that
+    resolves quickly (short sale, quick cure) is always captured even near
+    the cutoff.
+
+    Resolutions are the same as the LGD population's (lgd_default_episodes);
+    loans that left the data by some other route ("other_exit") are neither
+    resolved nor still open, so they are excluded rather than counted as
+    truncated. With config.DEFAULT_DPD_MONTHS = None the older 90+ DPD onset
+    / liquidation resolution is used (_extract_lgd_onset_rows_liquidation_only).
+    """
+    if config.DEFAULT_DPD_MONTHS is None:
+        return _extract_lgd_onset_rows_liquidation_only(df)
+
+    ep = lgd_default_episodes(df)
+    ep = ep[ep["resolution"] != "other_exit"]
+    if ep.empty:
+        return pd.DataFrame(columns=["loan_seq_num", "onset_date", "resolved", "resolution_date"])
+    out = ep.rename(columns={"default_date": "onset_date"})[
+        ["loan_seq_num", "onset_date", "resolution_date"]].copy()
+    out["resolved"] = out["resolution_date"].notna()
+    return out[["loan_seq_num", "onset_date", "resolved", "resolution_date"]]
+
+
+def _extract_lgd_onset_rows_liquidation_only(df: pd.DataFrame) -> pd.DataFrame:
     """
     One row per loan that ever enters workout (90+ days past due, per
     config.LGD_ONSET_DPD_MONTHS), recording when it entered and whether /
@@ -1749,9 +1980,14 @@ def main() -> None:
             ]
             log.info("  Dispositions: %s", "  ".join(parts))
             n_def = merged["zero_balance_code"].isin(DEFAULT_CODES).sum()
-            log.info("  Default events (★): %s", f"{int(n_def):,}")
+            log.info("  Credit dispositions (★): %s", f"{int(n_def):,}")
         else:
             log.info("  Dispositions: all NaN (loans still active)")
+
+        if config.DEFAULT_DPD_MONTHS is not None:
+            n_defaulted = merged.loc[default_event_rows(merged), "loan_seq_num"].nunique()
+            log.info("  Loans defaulting (90+ DPD / REO / credit disposition): %s",
+                     f"{n_defaulted:,}")
 
         # PD chunk
         pd_chunk = extract_pd_rows(merged)
@@ -1793,7 +2029,8 @@ def main() -> None:
         if not lgd_chunk.empty:
             lgd_cols     = [c for c in LGD_FEATURES if c in lgd_chunk.columns]
             lgd_required = [c for c in lgd_cols if lgd_chunk[c].notna().any()]
-            lgd_base     = [c for c in ["loan_seq_num", "zero_balance_date", "lgd", "lgd_raw"]
+            lgd_base     = [c for c in ["loan_seq_num", "zero_balance_date", "lgd", "lgd_raw",
+                                         "resolution", "default_date"]
                             if c in lgd_chunk.columns]
             lgd_chunk = lgd_chunk[list(dict.fromkeys(lgd_cols + lgd_base))]
             lgd_chunk = lgd_chunk.dropna(subset=lgd_required + ["lgd"]) if lgd_required \
@@ -1801,8 +2038,15 @@ def main() -> None:
             if not lgd_chunk.empty:
                 lgd_chunk.to_parquet(CHUNK_DIR / f"lgd_{year}.parquet", index=False)
                 lgd_row_total += len(lgd_chunk)
-                log.info("  LGD rows: %s  (mean LGD: %.4f)",
-                         f"{len(lgd_chunk):,}", lgd_chunk["lgd"].mean())
+                mix = ""
+                if "resolution" in lgd_chunk.columns:
+                    counts = lgd_chunk["resolution"].value_counts()
+                    mix = "  " + " / ".join(f"{k} {counts.get(k, 0):,}" for k in RESOLVED_LGD)
+                    liq = lgd_chunk.loc[lgd_chunk["resolution"] == "liquidated", "lgd"]
+                    if len(liq):
+                        mix += f"  (liquidated mean LGD: {liq.mean():.4f})"
+                log.info("  LGD rows: %s  (mean LGD: %.4f)%s",
+                         f"{len(lgd_chunk):,}", lgd_chunk["lgd"].mean(), mix)
 
         # Onset chunk — feeds the IPCW correction for LGD workout-period
         # truncation bias (compute_ipcw_weights(), applied after combining).

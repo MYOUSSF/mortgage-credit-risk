@@ -32,7 +32,7 @@ Full derivation in the [README's Ch.2 section](../../README.md#ch2--xgboost-pd).
 
 ## 4. Development Data
 
-Same population, target, and split as [pd_logistic_regression.md](pd_logistic_regression.md) (`config.DEFAULT_CODES`, `config.OOT_CUTOFF`, `config.PD_FEATURES`), with one difference: training uses a stratified **20% subsample** of the training parquet (`TRAIN_SAMPLE_FRAC = 0.20`, ~5M of ~24M rows) to keep peak RAM within Kaggle's 30 GB limit. This assumes the subsample is representative of the full training population — not separately re-verified against the full 24M rows in this repo.
+Same population, target, and split as [pd_logistic_regression.md](pd_logistic_regression.md) (`config.DEFAULT_DPD_MONTHS` / `config.DEFAULT_CODES`, `config.OOT_CUTOFF`, `config.PD_FEATURES`), with one difference: training uses a stratified **20% subsample** of the training parquet (`TRAIN_SAMPLE_FRAC = 0.20`, ~5M of ~24M rows) to keep peak RAM within Kaggle's 30 GB limit. This assumes the subsample is representative of the full training population — not separately re-verified against the full 24M rows in this repo.
 
 ## 5. Key Assumptions
 

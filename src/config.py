@@ -110,12 +110,45 @@ OOS_FRAC = 0.30
 # DEFAULT-EVENT DEFINITION
 # =============================================================================
 
-# Zero-balance codes treated as default events: 3rd-party sale, short sale,
-# repurchase, REO, note sale. 01 = prepayment (explicitly excluded). The
-# rare codes 16 (reperforming) and 96 (non-standard disposition) are
-# excluded — neither represents a credit loss event. See README's
-# "Default definition" note for the regulatory framing.
+# Basel default definition (CRR Art. 178; EBA/GL/2016/07). A loan defaults
+# in the FIRST month in which any of these holds:
+#   (a) past-due criterion   — 90+ days past due, i.e. delinquency_status
+#                              >= DEFAULT_DPD_MONTHS
+#   (b) unlikeliness to pay  — REO acquisition (delinquency_status "R"/"RA"),
+#                              or a credit-related zero-balance disposition
+#                              (DEFAULT_CODES) reached before 90 DPD, e.g. a
+#                              short sale agreed at 60 DPD.
+# Default is absorbing for the PD target: the loan leaves the PD and
+# survival panels at its first default, and a later cure or re-default is not
+# a second event (the LGD resolution below covers what happens afterwards).
+#
+# DEFAULT_DPD_MONTHS = None reverts to the older liquidation-only definition,
+# where only a DEFAULT_CODES disposition counts. That definition lags the
+# borrower's actual default by 1-3+ years of foreclosure timeline, never
+# counts loans that are modified or cured, and leaves recent vintages
+# heavily right-censored.
+DEFAULT_DPD_MONTHS: int | None = 3
+
+# Zero-balance codes that are credit-related dispositions: 3rd-party sale,
+# short sale, repurchase, REO, note sale. 01 = prepayment (explicitly
+# excluded). The rare codes 16 (reperforming) and 96 (non-standard
+# disposition) are excluded — neither represents a credit loss event. Under
+# the 90+ DPD definition these are criterion (b) above and the LGD
+# "liquidated" resolution; under the liquidation-only definition they are the
+# whole definition.
 DEFAULT_CODES = {"02", "03", "06", "09", "15"}
+
+# Cure after default (EBA/GL/2016/07 §71: minimum 3-month probation): the
+# loan reports current (0 months past due) for this many consecutive months.
+CURE_PROBATION_MONTHS = 3
+
+# LGD population. Basel LGD is estimated over ALL defaults under the same
+# definition as PD, so with the 90+ DPD definition a default that cures (or
+# is paid off in full) is a resolved default with LGD 0, alongside
+# liquidations with their realised loss. Excluding cures would pair a PD that
+# counts them with an LGD that ignores their zero losses, overstating
+# expected loss. False keeps liquidations only (loss given liquidation).
+LGD_INCLUDE_CURES = True
 
 TARGET_PD  = "default_12m"
 TARGET_LGD = "lgd"
@@ -203,9 +236,10 @@ PMMS_PATH = MACRO_DIR / "pmms_30yr_fixed.csv"
 
 # LGD workout-period truncation bias (IPCW correction) — thesis §3.3 note.
 # Onset trigger: 90+ days past due (delinquency_status in months >= 3), the
-# standard regulatory proxy for "entered workout", distinct from the
-# terminal zero-balance disposition code (DEFAULT_CODES) already used to
-# mark LGD resolution.
+# standard regulatory proxy for "entered workout". Under the 90+ DPD default
+# definition, onset is the default event itself (which also includes REO and
+# credit dispositions reached before 90 DPD); resolution is liquidation or,
+# with LGD_INCLUDE_CURES, a cure or payoff.
 LGD_ONSET_DPD_MONTHS = 3
 # Floor on the estimated censoring-survival probability Ĝ(t) used to build
 # inverse-probability-of-censoring weights, so a handful of very slow,
