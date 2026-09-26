@@ -253,8 +253,22 @@ def _first_line(path: Path) -> str:
         return fh.readline().rstrip("\r\n")
 
 
+# Field counts seen in real Freddie Mac releases whose column positions have
+# been checked against the data, per file kind. A file with one of these
+# counts is logged once at INFO; any other count is a WARNING on every file,
+# because an unverified layout could have shifted a column the pipeline uses.
+#   orig 31 — 2001-2025 release: one trailing field dropped; fields 1-23 (all
+#             the pipeline reads) verified by value checks on loan_purpose,
+#             orig_loan_term and num_borrowers.
+#   svcg 35 — 2001-2025 release: three fields appended; the used fields
+#             verified by 2001 dispositions matching the 32-field release.
+VERIFIED_FIELD_COUNTS = {"orig": {31, 32}, "svcg": {32, 35}}
+_reported_layouts: set[tuple[str, int]] = set()
+
+
 def _read_csv_pipe(path: Path, names: list[str], usecols: list[int] | None = None,
-                   na_values: list[str] | None = None) -> pd.DataFrame:
+                   na_values: list[str] | None = None,
+                   kind: str | None = None) -> pd.DataFrame:
     """
     Shared CSV reader for Freddie Mac's pipe-delimited latin-1 files.
 
@@ -279,10 +293,16 @@ def _read_csv_pipe(path: Path, names: list[str], usecols: list[int] | None = Non
     has_header = not any(ch.isdigit() for ch in first)
     n_fields = first.count("|") + 1
 
-    if n_fields != len(names):
-        log.warning("  %s has %d fields per record; the layout in this script "
-                    "has %d — mapping known columns by position.",
+    if n_fields not in VERIFIED_FIELD_COUNTS.get(kind, {len(names)}):
+        log.warning("  %s has %d fields per record — not a verified layout "
+                    "(script layout: %d). Mapping known columns by position; "
+                    "check that the values in the columns used look right.",
                     path.name, n_fields, len(names))
+    elif n_fields != len(names) and (kind, n_fields) not in _reported_layouts:
+        _reported_layouts.add((kind, n_fields))
+        log.info("  %s files have %d fields per record (verified layout, "
+                 "script layout %d) — known columns mapped by position.",
+                 kind, n_fields, len(names))
     file_names = list(names[:n_fields]) + [f"_extra_{i}" for i in range(len(names), n_fields)]
     missing_trailing = list(names[n_fields:])
 
@@ -317,7 +337,7 @@ def load_orig_year(year: int) -> pd.DataFrame:
 
     # Freddie Mac encodes missing numerics as sentinel strings (9, 99, …)
     numeric_na = ["", " ", "9", "99", "999", "9999", "99999", "999999", "9999999"]
-    return _read_csv_pipe(path, ORIG_COLS, na_values=numeric_na)
+    return _read_csv_pipe(path, ORIG_COLS, na_values=numeric_na, kind="orig")
 
 
 def load_svcg_year(year: int) -> pd.DataFrame:
@@ -328,7 +348,7 @@ def load_svcg_year(year: int) -> pd.DataFrame:
         return pd.DataFrame(columns=SVCG_USECOLS)
 
     usecol_idx = [SVCG_COLS.index(c) for c in SVCG_USECOLS]
-    df = _read_csv_pipe(path, SVCG_COLS, usecols=usecol_idx)
+    df = _read_csv_pipe(path, SVCG_COLS, usecols=usecol_idx, kind="svcg")
     return df.dropna(subset=["loan_seq_num", "monthly_reporting_period"])
 
 
@@ -1292,9 +1312,13 @@ def extract_lgd_rows(df: pd.DataFrame) -> pd.DataFrame:
     )
 
     upb  = defaults["zero_balance_removal_upb"].fillna(defaults["current_upb"])
-    # Freddie Mac reports realised losses as negative amounts; flip the sign.
-    # Missing losses stay NaN (dropped below) rather than being treated as zero.
-    loss = -pd.to_numeric(defaults["actual_loss"], errors="coerce")
+    # In this dataset actual_loss is POSITIVE for a loss. The sign was once
+    # flipped on the assumption that losses are reported as negatives, and
+    # every vintage's mean LGD collapsed to 0.001-0.04 (2007 REOs included),
+    # because the negated losses were then clipped to 0; unflipped, mean LGD
+    # is ~0.49 with ~4% of loans at exactly 0. Missing losses stay NaN
+    # (dropped below) rather than being treated as zero.
+    loss = pd.to_numeric(defaults["actual_loss"], errors="coerce")
 
     with np.errstate(divide="ignore", invalid="ignore"):
         lgd_raw = np.where(upb > 0, loss / upb, np.nan)
@@ -1302,7 +1326,16 @@ def extract_lgd_rows(df: pd.DataFrame) -> pd.DataFrame:
     defaults["lgd_raw"] = lgd_raw
     defaults["lgd"]     = np.clip(lgd_raw, 0, 1)
 
-    return defaults.dropna(subset=["lgd"])
+    out = defaults.dropna(subset=["lgd"])
+    # Sign guard: resolved mortgage defaults almost never lose nothing, so a
+    # majority at LGD = 0 means the loss sign convention is wrong for this
+    # data release (or actual_loss is misaligned), not a real recovery rate.
+    if len(out) >= 20 and (out["lgd"] == 0).mean() > 0.5:
+        log.warning("  %.0f%% of resolved defaults have LGD = 0 (%.0f%% of raw "
+                    "ratios are negative) — check the actual_loss sign "
+                    "convention before using the LGD data.",
+                    100 * (out["lgd"] == 0).mean(), 100 * (out["lgd_raw"] < 0).mean())
+    return out
 
 
 # =============================================================================
