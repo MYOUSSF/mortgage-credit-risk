@@ -47,11 +47,42 @@ SEED = 42
 # =============================================================================
 
 REPO_ROOT = Path(__file__).resolve().parent.parent    # src/config.py → repo root
-DATA_DIR  = Path(os.environ.get("MCR_DATA_DIR", REPO_ROOT/"data"))
 
-RAW_DIR   = Path(os.environ.get("MCR_RAW_DIR",  DATA_DIR/"raw"/"freddie_mac"))
-PROC_DIR  = Path(os.environ.get("MCR_PROC_DIR", DATA_DIR/"processed"))
-MACRO_DIR = Path(os.environ.get("MCR_MACRO_DIR", DATA_DIR/"macro"))
+# Kaggle layout. Inputs are read-only mounts under /kaggle/input; only
+# /kaggle/working is writable, and it is what a notebook publishes as its
+# output. Detected here so that the notebooks AND the scripts they launch with
+# `!python src/...` (separate processes, which import this module themselves)
+# resolve the same paths without any notebook having to set them.
+ON_KAGGLE = Path("/kaggle/input").is_dir()
+# Raw Freddie Mac .txt files (freddie_mac/) and the macro CSVs (macro/).
+KAGGLE_DATASET_DIR = Path("/kaggle/input/datasets/youssefmousaaid/freddiemacmorgatge")
+# Notebook 1 (01-eda-ipynb) writes the processed pd_*/lgd_*/surv_* datasets
+# under /kaggle/working/repo/data; notebooks 2-8 attach that notebook's output
+# and read them from this mount.
+KAGGLE_UPSTREAM_PROC_DIR = Path(
+    "/kaggle/input/notebooks/youssefmousaaid/01-eda-ipynb/repo/data/processed")
+
+if ON_KAGGLE:
+    _default_data  = Path("/kaggle/working/repo/data")
+    _default_raw   = KAGGLE_DATASET_DIR/"freddie_mac"
+    _default_macro = KAGGLE_DATASET_DIR/"macro"
+else:
+    _default_data  = REPO_ROOT/"data"
+    _default_raw   = None     # derived from DATA_DIR below
+    _default_macro = None
+
+# Every path can still be overridden with its MCR_* environment variable.
+DATA_DIR  = Path(os.environ.get("MCR_DATA_DIR", _default_data))
+
+RAW_DIR   = Path(os.environ.get("MCR_RAW_DIR",  _default_raw or DATA_DIR/"raw"/"freddie_mac"))
+MACRO_DIR = Path(os.environ.get("MCR_MACRO_DIR", _default_macro or DATA_DIR/"macro"))
+# On Kaggle, read notebook 1's published datasets when they are attached (the
+# modelling notebooks); otherwise — i.e. when running notebook 1 itself —
+# write them under DATA_DIR, which is where that mount is published from.
+PROC_DIR  = Path(os.environ.get(
+    "MCR_PROC_DIR",
+    KAGGLE_UPSTREAM_PROC_DIR if ON_KAGGLE and KAGGLE_UPSTREAM_PROC_DIR.is_dir()
+    else DATA_DIR/"processed"))
 
 OUT_DIR = Path(os.environ.get("MCR_OUT_DIR", DATA_DIR/"outputs"))
 FIG_DIR = Path(os.environ.get("MCR_FIG_DIR", DATA_DIR/"figures"))

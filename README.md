@@ -229,31 +229,22 @@ Every script imports `config.py` for values that must stay identical across the 
 
 ### Running on Kaggle (or any chained-notebook setup)
 
-All paths are environment-driven, so nothing in `src/` needs editing to move between machines:
+All paths are resolved in `src/config.py`, so neither the notebooks nor anything else in `src/` sets paths. `config.py` detects Kaggle (`/kaggle/input` exists) and switches to the Kaggle layout. Any path can still be overridden with an environment variable:
 
-| Variable | Default | What it holds |
-|---|---|---|
-| `MCR_DATA_DIR` | `<repo>/data` | Root for everything below |
-| `MCR_RAW_DIR` | `$MCR_DATA_DIR/raw/freddie_mac` | Raw Freddie Mac `.txt` files |
-| `MCR_MACRO_DIR` | `$MCR_DATA_DIR/macro` | HPI / unemployment / PMMS |
-| `MCR_PROC_DIR` | `$MCR_DATA_DIR/processed` | Processed **datasets** — the `pd_*`, `lgd_*`, `surv_*` parquet |
-| `MCR_OUT_DIR` | **`$MCR_PROC_DIR`** | Derived **artifacts** — metrics, coefficients, per-loan scores |
-| `MCR_FIG_DIR` | `$MCR_DATA_DIR/figures` | Figures |
+| Variable | Local default | Kaggle default | What it holds |
+|---|---|---|---|
+| `MCR_DATA_DIR` | `<repo>/data` | `/kaggle/working/repo/data` | Root for the writable directories below |
+| `MCR_RAW_DIR` | `$MCR_DATA_DIR/raw/freddie_mac` | `<dataset>/freddie_mac` | Raw Freddie Mac `.txt` files |
+| `MCR_MACRO_DIR` | `$MCR_DATA_DIR/macro` | `<dataset>/macro` | HPI / unemployment / PMMS |
+| `MCR_PROC_DIR` | `$MCR_DATA_DIR/processed` | Notebook 1's output mount if attached, else `$MCR_DATA_DIR/processed` | Processed **datasets**: the `pd_*`, `lgd_*`, `surv_*` parquet |
+| `MCR_OUT_DIR` | `$MCR_DATA_DIR/outputs` | same | Derived **artifacts**: metrics, coefficients, per-loan scores |
+| `MCR_FIG_DIR` | `$MCR_DATA_DIR/figures` | same | Figures |
 
-`MCR_OUT_DIR` defaults to `MCR_PROC_DIR`, so with nothing set everything lands in `data/processed/` and every path quoted in this README and the model cards stays correct.
+`<dataset>` is `config.KAGGLE_DATASET_DIR` (`/kaggle/input/datasets/youssefmousaaid/freddiemacmorgatge`). Notebook 1's output mount is `config.KAGGLE_UPSTREAM_PROC_DIR`. If you fork the notebooks, change those two constants.
 
-**Why the split exists.** Script `01` is slow (~20 min), so its parquet output is usually produced once and then attached to later notebooks as an input dataset — which Kaggle mounts **read-only**. Scripts `02`–`12` read those datasets *and* write their own results, and if both point at the same directory the write fails with `OSError: [Errno 30] Read-only file system`. Separating the two fixes it:
+**How the notebook chain works.** Script `01` is slow, so Notebook 1 runs it once and publishes the processed datasets from `/kaggle/working/repo/data/processed`. Notebooks 2–8 attach Notebook 1's output as an input; Kaggle mounts it **read-only**. When that mount is present, `config.py` reads the datasets from it and writes every script's results to the writable `/kaggle/working/repo/data`. Reading and writing different directories is what avoids `OSError: [Errno 30] Read-only file system`.
 
-```python
-import os
-os.environ["MCR_PROC_DIR"] = "/kaggle/input/<your-notebook-output>/data/processed"  # read-only
-os.environ["MCR_OUT_DIR"]  = "/kaggle/working/data/outputs"                          # writable
-os.environ["MCR_FIG_DIR"]  = "/kaggle/working/data/figures"
-```
-
-Set these **before** importing any pipeline module: each script binds `PROC_DIR`/`OUT_DIR`/`FIG_DIR` at import time, so changing the environment afterwards has no effect in an already-imported kernel.
-
-When running `01` itself, `MCR_PROC_DIR` must point somewhere writable — that is where the parquet is produced.
+The scripts run as `!python src/...` subprocesses, which import `config.py` themselves, so they resolve the same paths as the notebook without anything being passed to them. If you do override a path with an `MCR_*` variable inside a notebook, set it **before** importing any pipeline module: each module binds its paths at import time.
 
 ### Testing
 
