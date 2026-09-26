@@ -92,8 +92,8 @@ OUT_DIR.mkdir(parents=True, exist_ok=True)
 PROC_DIR.mkdir(parents=True, exist_ok=True)
 CHUNK_DIR.mkdir(parents=True, exist_ok=True)
 
-START_YEAR = 2000
-END_YEAR   = 2020
+START_YEAR = 2001
+END_YEAR   = 2025
 
 OOT_CUTOFF = config.OOT_CUTOFF
 SEED       = config.SEED

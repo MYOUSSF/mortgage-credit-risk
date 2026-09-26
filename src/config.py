@@ -69,7 +69,7 @@ CHUNK_DIR = Path(os.environ.get("MCR_CHUNK_DIR", PROC_DIR/"chunks"))
 # out-of-time (OOT) validation. Loans originated through 2020 have servicer
 # performance history through ~2024, so setting the cutoff at mid-2017
 # gives ~17 years in-sample and ~7 years OOT.
-OOT_CUTOFF = pd.Timestamp("2017-06-01")
+OOT_CUTOFF = pd.Timestamp("2020-01-01")
 
 # Fraction of the in-sample (pre-OOT_CUTOFF) population held out as OOS.
 OOS_FRAC = 0.30
@@ -345,7 +345,8 @@ DISCRETE_HAZARD_LIFETIME_CAP_MONTHS = 360
 # Snapshot dates at which the 12-month conditional PD is validated against
 # realised 12-month outcomes. Chosen to sit inside the OOT window with a full
 # 365-day forward window observable after each.
-DISCRETE_HAZARD_SNAPSHOT_DATES = ["2018-06-01", "2019-06-01", "2020-06-01"]
+DISCRETE_HAZARD_SNAPSHOT_DATES = ["2020-06-01", "2021-06-01", "2022-06-01",
+                                    "2023-06-01", "2024-06-01"]
 
 # Covariates tested for proportional hazards (covariate x spline(loan_age)
 # interaction, likelihood-ratio test against the main model). Only meaningful
