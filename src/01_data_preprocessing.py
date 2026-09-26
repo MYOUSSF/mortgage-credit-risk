@@ -808,7 +808,9 @@ def extract_pd_rows(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def filter_immature_right_censored(df: pd.DataFrame,
-                                    window_days: int = 365) -> pd.DataFrame:
+                                    window_days: int = 365,
+                                    global_max_date: pd.Timestamp | None = None,
+                                    quiet: bool = False) -> pd.DataFrame:
     """
     Drop right-censored PD rows too close to the dataset's true end to
     know their 12-month outcome.
@@ -828,19 +830,22 @@ def filter_immature_right_censored(df: pd.DataFrame,
     — that label is already correct regardless of how close report_date
     is to the dataset's end, since the true outcome is observed.
 
-    Must be called after combining all yearly chunks (needs the true
-    global max report_date, not a single origination-year cohort's max).
+    Needs the true panel-wide max report_date, not a single origination-year
+    cohort's max: pass it as global_max_date when filtering one chunk at a
+    time (stream_pd_splits); otherwise it is taken from df itself.
     """
-    global_max_date = df["report_date"].max()
+    if global_max_date is None:
+        global_max_date = df["report_date"].max()
     cutoff = global_max_date - pd.Timedelta(days=window_days)
     immature = (~df["has_default"]) & (df["report_date"] > cutoff)
 
-    log.info(
-        "  filter_immature_right_censored: dropping %s of %s rows "
-        "(report_date > %s, never observed to default) — panel max date: %s",
-        f"{int(immature.sum()):,}", f"{len(df):,}",
-        cutoff.date(), global_max_date.date(),
-    )
+    if not quiet:
+        log.info(
+            "  filter_immature_right_censored: dropping %s of %s rows "
+            "(report_date > %s, never observed to default) — panel max date: %s",
+            f"{int(immature.sum()):,}", f"{len(df):,}",
+            cutoff.date(), global_max_date.date(),
+        )
     return df[~immature].drop(columns=["has_default"]).copy()
 
 
@@ -1690,7 +1695,8 @@ def compute_ipcw_weights(onset_df: pd.DataFrame,
 # TRAIN / OOS / OOT SPLIT
 # =============================================================================
 
-def split_pd(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def split_pd(df: pd.DataFrame, allow_empty_in_sample: bool = False,
+             quiet: bool = False) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
     Temporal OOT split + random, loan-grouped OOS split on the in-sample portion.
 
@@ -1728,6 +1734,11 @@ def split_pd(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame
     oot        = df[df["report_date"] >= OOT_CUTOFF].copy()
 
     # ── FIX: guard against empty in_sample before calling sklearn ────────
+    # A single origination-year chunk legitimately has no in-sample rows when
+    # the whole vintage postdates OOT_CUTOFF (stream_pd_splits passes
+    # allow_empty_in_sample=True); for the whole panel it means broken dates.
+    if in_sample.empty and allow_empty_in_sample:
+        return in_sample, in_sample.copy(), oot
     if in_sample.empty:
         raise ValueError(
             f"split_pd: in_sample is empty after applying OOT_CUTOFF "
@@ -1746,14 +1757,108 @@ def split_pd(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame
     train = in_sample.iloc[train_idx]
     oos   = in_sample.iloc[oos_idx]
 
-    log.info(
-        "  PD split — Train: %s  OOS: %s  OOT: %s  (OOS row fraction of "
-        "in-sample: %.1f%%, target %.1f%% — approximate since loans have "
-        "differing month counts)",
-        f"{len(train):,}", f"{len(oos):,}", f"{len(oot):,}",
-        len(oos) / len(in_sample) * 100, OOS_FRAC * 100,
-    )
+    if not quiet:
+        log.info(
+            "  PD split — Train: %s  OOS: %s  OOT: %s  (OOS row fraction of "
+            "in-sample: %.1f%%, target %.1f%% — approximate since loans have "
+            "differing month counts)",
+            f"{len(train):,}", f"{len(oos):,}", f"{len(oot):,}",
+            len(oos) / len(in_sample) * 100, OOS_FRAC * 100,
+        )
     return train, oos, oot
+
+
+def stream_pd_splits(pd_files: list, out_dir: Path) -> dict:
+    """
+    Filter, split and write the PD panel one origination-year chunk at a
+    time, never holding the whole panel in memory.
+
+    The full panel (63M loan-months for the 2001-2025 vintages) is ~12-15 GB
+    as a DataFrame, and the old concatenate-then-filter-then-split path held
+    two or three copies of it at once, which exhausts a 30 GB Kaggle kernel.
+    Both steps are chunk-local, for the same reason stream_survival_splits()
+    is: a sample_svcg_YYYY.txt file holds the complete history of the loans
+    originated in YYYY, so no loan spans two chunks.
+
+      * the immaturity filter only needs the panel-wide max report_date,
+        found first by reading that one column from every chunk;
+      * the OOT cut is by row date, and the train/OOS GroupShuffleSplit is by
+        loan, so per-chunk splitting keeps every loan's rows together.
+
+    As with the survival panel, which specific in-sample loans land in train
+    vs OOS differs from one global draw; the design (loan-grouped, ~OOS_FRAC
+    held out, same OOT_CUTOFF) and the aggregate proportions do not.
+
+    Writes pd_{train,oos,oot}.parquet (one row group per chunk) and returns
+    row / default / loan counts plus the panel max date.
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    global_max = max(pd.read_parquet(f, columns=["report_date"])["report_date"].max()
+                     for f in pd_files)
+
+    # One schema for every chunk. A column that is all-null in one vintage
+    # would otherwise be typed `null` there and clash with the others.
+    schemas = [pq.read_schema(f).remove_metadata() for f in pd_files]
+    try:
+        schema = pa.unify_schemas(schemas, promote_options="permissive")
+    except TypeError:   # pyarrow < 14 has no promote_options
+        schema = pa.unify_schemas(schemas)
+    if "has_default" in schema.names:
+        schema = schema.remove(schema.get_field_index("has_default"))
+
+    names = ("train", "oos", "oot")
+    writers: dict[str, pq.ParquetWriter] = {}
+    stats = {"global_max_date": global_max, "rows_in": 0, "rows_immature": 0,
+             "rows": dict.fromkeys(names, 0), "defaults": dict.fromkeys(names, 0),
+             "loans": dict.fromkeys(names, 0)}
+    try:
+        for path in pd_files:
+            chunk = pd.read_parquet(path)
+            stats["rows_in"] += len(chunk)
+            kept = filter_immature_right_censored(chunk, global_max_date=global_max,
+                                                  quiet=True)
+            stats["rows_immature"] += len(chunk) - len(kept)
+            del chunk
+
+            parts = split_pd(kept, allow_empty_in_sample=True, quiet=True)
+            del kept
+            for name, part in zip(names, parts):
+                if part.empty:
+                    continue
+                stats["rows"][name]     += len(part)
+                stats["defaults"][name] += int(part[config.TARGET_PD].sum())
+                stats["loans"][name]    += part["loan_seq_num"].nunique()
+                table = pa.Table.from_pandas(part[schema.names], schema=schema,
+                                             preserve_index=False)
+                if name not in writers:
+                    writers[name] = pq.ParquetWriter(out_dir / f"pd_{name}.parquet", schema)
+                writers[name].write_table(table)
+                del table
+            del parts
+            gc.collect()
+    finally:
+        for writer in writers.values():
+            writer.close()
+    return stats
+
+
+def load_pd_columns(path: Path, columns: list[str]) -> pd.DataFrame:
+    """
+    Read only `columns` of a PD split, in compact dtypes: strings as
+    categories (read as dictionaries, never materialised as Python str
+    objects) and float64 as float32. Enough for the IV/PSI diagnostics
+    without loading the full split.
+    """
+    import pyarrow.parquet as pq
+    available = set(pq.read_schema(path).names)
+    cols = [c for c in columns if c in available]
+    cat_cols = [c for c in cols if c in config.PD_CAT_FEATURES]
+    df = pq.read_table(path, columns=cols, read_dictionary=cat_cols).to_pandas()
+    for c in df.select_dtypes("float64").columns:
+        df[c] = df[c].astype(np.float32)
+    return df
 
 
 def split_lgd(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -2097,27 +2202,34 @@ def main() -> None:
     if not pd_files:
         raise RuntimeError("No PD chunk files produced — inspect year-by-year output above.")
 
-    pd_all  = pd.concat([pd.read_parquet(f) for f in pd_files],  ignore_index=True)
     lgd_all = pd.concat([pd.read_parquet(f) for f in lgd_files], ignore_index=True) \
               if lgd_files else pd.DataFrame()
     onset_all = pd.concat([pd.read_parquet(f) for f in onset_files], ignore_index=True) \
                 if onset_files else pd.DataFrame(columns=["loan_seq_num", "onset_date", "resolved", "resolution_date"])
 
-    log.info("  PD  combined: %s rows  (before immaturity filter)", f"{len(pd_all):,}")
     log.info("  LGD combined: %s rows", f"{len(lgd_all):,}")
 
-    global_max_report_date = pd_all["report_date"].max()
-    pd_all = filter_immature_right_censored(pd_all)
-    log.info("  PD  after immaturity filter: %s rows  (overall default rate: %.4f%%)",
-             f"{len(pd_all):,}", pd_all["default_12m"].mean() * 100)
-
-    pd_cols = [c for c in PD_FEATURES if c in pd_all.columns]
-    pd_train, pd_oos, pd_oot = split_pd(pd_all)
-    # split_pd() returns independent frames, so the combined panel is dead
-    # weight from here on — and it is one of the largest objects alive when
-    # the saving stage runs.
-    del pd_all
-    gc.collect()
+    # The PD panel is never concatenated: at 60M+ loan-months, the combined
+    # frame plus the filtered and split copies exhausted a 30 GB kernel.
+    # stream_pd_splits() filters, splits and writes it one vintage at a time.
+    pd_stats = stream_pd_splits(pd_files, PROC_DIR)
+    global_max_report_date = pd_stats["global_max_date"]
+    n_kept = sum(pd_stats["rows"].values())
+    log.info("  PD panel: %s rows; immaturity filter dropped %s (never observed to "
+             "default, report_date within 365 days of the panel end, %s)",
+             f"{pd_stats['rows_in']:,}", f"{pd_stats['rows_immature']:,}",
+             global_max_report_date.date())
+    log.info("  PD after filter: %s rows  (overall default rate: %.4f%%)",
+             f"{n_kept:,}", 100 * sum(pd_stats["defaults"].values()) / max(n_kept, 1))
+    in_sample_rows = pd_stats["rows"]["train"] + pd_stats["rows"]["oos"]
+    log.info("  PD split — Train: %s  OOS: %s  OOT: %s  (OOS row fraction of "
+             "in-sample: %.1f%%, target %.1f%%)",
+             *(f"{pd_stats['rows'][n]:,}" for n in ("train", "oos", "oot")),
+             100 * pd_stats["rows"]["oos"] / max(in_sample_rows, 1), OOS_FRAC * 100)
+    for name in ("train", "oos", "oot"):
+        log.info("      pd_%-5s %s rows / %s loans / default rate %.4f%%", name,
+                 f"{pd_stats['rows'][name]:,}", f"{pd_stats['loans'][name]:,}",
+                 100 * pd_stats["defaults"][name] / max(pd_stats["rows"][name], 1))
 
     def _attach_ipcw(d: pd.DataFrame, ipcw: pd.DataFrame) -> pd.DataFrame:
         if d.empty or "loan_seq_num" not in d.columns:
@@ -2145,14 +2257,29 @@ def main() -> None:
     # ── Information Value ────────────────────────────────────────────────
     log.info("")
     log.info("[+] Computing Information Values on PD training set …")
+    # Diagnostics read back only the feature columns, in compact dtypes.
+    import pyarrow.parquet as pq
+    pd_cols = [c for c in PD_FEATURES
+               if c in pq.read_schema(PROC_DIR / "pd_train.parquet").names]
+    pd_train = load_pd_columns(PROC_DIR / "pd_train.parquet", pd_cols + [config.TARGET_PD])
     iv_summary = compute_all_iv(pd_train, pd_cols)
     log.info("\n%s", iv_summary.to_string(index=False))
 
     # ── Population Stability Index ───────────────────────────────────────
     log.info("")
     log.info("[+] Computing PSI (Train vs OOS and Train vs OOT) …")
-    psi_oos = compute_all_psi(pd_train, pd_oos, pd_cols, "OOS")
-    psi_oot = compute_all_psi(pd_train, pd_oot, pd_cols, "OOT")
+    def _psi_against(ref: pd.DataFrame, name: str) -> pd.DataFrame:
+        path = PROC_DIR / f"pd_{name}.parquet"
+        if not path.exists():
+            return compute_all_psi(ref, pd.DataFrame(), pd_cols, name.upper())
+        test = load_pd_columns(path, pd_cols)
+        out = compute_all_psi(ref, test, pd_cols, name.upper())
+        del test
+        gc.collect()
+        return out
+
+    psi_oos = _psi_against(pd_train, "oos")
+    psi_oot = _psi_against(pd_train, "oot")
     psi_all = psi_oos.merge(psi_oot, on="feature", how="outer")
     log.info("\n%s", psi_all.to_string(index=False))
 
@@ -2160,9 +2287,7 @@ def main() -> None:
     log.info("")
     log.info("[4/4] Saving outputs to %s …", OUT_DIR.resolve())
 
-    pd_train.to_parquet(PROC_DIR / "pd_train.parquet",   index=False)
-    pd_oos.to_parquet(  PROC_DIR / "pd_oos.parquet",     index=False)
-    pd_oot.to_parquet(  PROC_DIR / "pd_oot.parquet",     index=False)
+    # pd_{train,oos,oot}.parquet were already written by stream_pd_splits().
     iv_summary.to_csv(  OUT_DIR / "pd_iv_summary.csv",  index=False)
     psi_all.to_csv(     OUT_DIR / "pd_psi_summary.csv", index=False)
 
@@ -2180,7 +2305,7 @@ def main() -> None:
     # chunk at a time rather than being concatenated whole. Concatenating it
     # here — while pd_all, the three PD splits and the LGD frames were all
     # still live — is what exhausted memory on Kaggle at the saving stage.
-    del pd_train, pd_oos, pd_oot
+    del pd_train
     if not lgd_all.empty:
         del lgd_train, lgd_oos, lgd_oot
     del lgd_all, onset_all, iv_summary, psi_all, psi_oos, psi_oot

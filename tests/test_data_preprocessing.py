@@ -195,7 +195,7 @@ def test_split_pd_raises_on_empty_in_sample(preprocessing):
     # All rows past the OOT cutoff -> in_sample is empty. This should raise
     # a descriptive error rather than crash inside sklearn with n_samples=0.
     df = pd.DataFrame({
-        "report_date": pd.date_range("2018-01-01", periods=10, freq="MS"),
+        "report_date": pd.date_range(preprocessing.OOT_CUTOFF, periods=10, freq="MS"),
         "x": np.arange(10),
     })
     with pytest.raises(ValueError, match="in_sample is empty"):

@@ -401,7 +401,9 @@ def test_no_loan_history_spans_two_survival_splits(preprocessing):
 def test_survival_split_uses_the_same_oot_cutoff_constant(preprocessing):
     import config
     frames = []
-    for i, start in enumerate(["2010-01-01", "2020-01-01"]):
+    # Second cohort originates after the cutoff (orig_date = start - 1 month).
+    after = (config.OOT_CUTOFF + pd.DateOffset(months=2)).strftime("%Y-%m-%d")
+    for i, start in enumerate(["2010-01-01", after]):
         for j in range(12):
             frames.extend(_perf_rows(f"L{i}{j}", start, 6, terminal_code="01"))
     panel = preprocessing.extract_survival_rows(pd.DataFrame(frames))
