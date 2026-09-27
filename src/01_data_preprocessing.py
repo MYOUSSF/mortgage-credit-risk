@@ -93,7 +93,7 @@ PROC_DIR.mkdir(parents=True, exist_ok=True)
 CHUNK_DIR.mkdir(parents=True, exist_ok=True)
 
 START_YEAR = 2001
-END_YEAR   = 2025
+END_YEAR   = 2002
 
 OOT_CUTOFF = config.OOT_CUTOFF
 SEED       = config.SEED
@@ -371,6 +371,7 @@ def load_hpi() -> pd.DataFrame | None:
 
     hpi = pd.read_csv(path, dtype=str)
     hpi.columns      = hpi.columns.str.lower().str.strip()
+    hpi["zip3"]      = hpi["zip3"].str.strip().str.zfill(3)
     hpi["year"]      = hpi["year"].astype(int)
     hpi["quarter"]   = hpi["quarter"].astype(int)
     hpi["hpi_index"] = pd.to_numeric(hpi["hpi_index"], errors="coerce")
@@ -491,7 +492,10 @@ def clean_orig(df: pd.DataFrame) -> pd.DataFrame:
     ) - pd.DateOffset(months=1)
 
     # Derive 3-digit ZIP for HPI join
-    out["zip3"] = out["postal_code"].str.strip().str.zfill(5).str[:3]
+    pc = out["postal_code"].str.strip()
+    is_prefix = pc.str.len().le(3).fillna(False).astype(bool)
+    zip3 = pc.str.zfill(5).str[:3].mask(is_prefix, pc.str.zfill(3))
+    out["zip3"] = zip3.where(pc.str.len().fillna(0).astype(int) > 0)
 
     # Numeric casts
     for col in ["credit_score", "orig_cltv", "orig_ltv", "orig_dti",
